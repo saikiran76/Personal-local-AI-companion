@@ -1,0 +1,263 @@
+/* ============================================
+   DESIGN-vercel.css — Centralized UI Design Tokens
+   Source: DESIGN-vercel.md
+   ============================================ */
+
+/* --- Colors --- */
+:root {
+  --color-primary: #171717;
+  --color-on-primary: #ffffff;
+  --color-ink: #171717;
+  --color-body: #4d4d4d;
+  --color-mute: #8f8f8f;
+  --color-faint: #a1a1a1;
+  --color-hairline: #ebebeb;
+  --color-hairline-soft: #f2f2f2;
+  --color-canvas: #fafafa;
+  --color-canvas-elevated: #ffffff;
+  --color-link: #0070f3;
+  --color-link-deep: #0761d1;
+  --color-link-soft: #d3e5ff;
+  --color-error: #ee0000;
+  --color-error-deep: #c50000;
+  --color-warning: #f5a623;
+  --color-warning-soft: #ffefcf;
+  --color-warning-deep: #ab570a;
+  --color-violet: #7928ca;
+  --color-violet-soft: #d8ccf1;
+  --color-cyan: #50e3c2;
+  --color-cyan-soft: #aaffec;
+  --color-pink: #ff0080;
+  --color-magenta: #eb367f;
+
+  --gradient-develop-start: #007cf0;
+  --gradient-develop-end: #00dfd8;
+  --gradient-preview-start: #7928ca;
+  --gradient-preview-end: #ff0080;
+  --gradient-ship-start: #ff4d4d;
+  --gradient-ship-end: #f9cb28;
+
+  --gradient-mesh: linear-gradient(
+    135deg,
+    var(--gradient-develop-start) 0%,
+    var(--gradient-develop-end) 20%,
+    var(--gradient-preview-start) 45%,
+    var(--gradient-preview-end) 65%,
+    var(--gradient-ship-end) 85%,
+    var(--gradient-ship-start) 100%
+  );
+
+  --rounded-none: 0px;
+  --rounded-sm: 6px;
+  --rounded-md: 12px;
+  --rounded-lg: 16px;
+  --rounded-pill-category: 64px;
+  --rounded-pill: 100px;
+  --rounded-full: 9999px;
+
+  --spacing-xxs: 4px;
+  --spacing-xs: 8px;
+  --spacing-sm: 12px;
+  --spacing-md: 16px;
+  --spacing-lg: 24px;
+  --spacing-xl: 32px;
+  --spacing-2xl: 40px;
+  --spacing-3xl: 64px;
+  --spacing-4xl: 96px;
+
+  --shadow-whisper: 0px 1px 1px rgba(0,0,0,0.04);
+  --shadow-floating:
+    0px 2px 2px rgba(0,0,0,0.04),
+    0px 8px 16px -4px rgba(0,0,0,0.06);
+}
+
+/* --- Reset --- */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: 'Geist', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+  font-size: 14px;
+  line-height: 20px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* --- Title Bar --- */
+.titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 36px;
+  padding: 0 var(--spacing-sm);
+  background: var(--color-canvas);
+  -webkit-app-region: drag;
+  user-select: none;
+  border-bottom: 1px solid var(--color-hairline);
+  z-index: 100;
+}
+
+.titlebar-title {
+  font-family: 'Geist Mono', 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--color-mute);
+  letter-spacing: 0.02em;
+}
+
+.titlebar-controls {
+  display: flex;
+  gap: 6px;
+  -webkit-app-region: no-drag;
+}
+
+.titlebar-btn {
+  width: 14px;
+  height: 14px;
+  border-radius: var(--rounded-full);
+  border: none;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.titlebar-btn:hover { opacity: 0.7; }
+.btn-minimize { background: var(--color-warning); }
+.btn-maximize { background: #28c840; }
+.btn-close { background: var(--color-error); }
+
+/* --- Buttons --- */
+.btn-primary {
+  background: var(--color-primary);
+  color: var(--color-on-primary);
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 20px;
+  border: none;
+  border-radius: var(--rounded-pill);
+  padding: 12px 28px;
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.1s;
+}
+.btn-primary:hover { opacity: 0.85; }
+.btn-primary:active { transform: scale(0.97); }
+.btn-primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn-secondary {
+  background: var(--color-canvas-elevated);
+  color: var(--color-ink);
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 20px;
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--rounded-pill);
+  padding: 12px 28px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.btn-secondary:hover { background: var(--color-hairline-soft); }
+
+.btn-ghost {
+  background: transparent;
+  color: var(--color-body);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  border: none;
+  border-radius: var(--rounded-full);
+  padding: 8px 16px;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.btn-ghost:hover { color: var(--color-ink); }
+
+/* --- Cards --- */
+.card {
+  background: var(--color-canvas-elevated);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--rounded-md);
+  padding: var(--spacing-lg);
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+.card:hover { box-shadow: var(--shadow-floating); }
+
+.card-selected {
+  border-color: var(--color-ink);
+  box-shadow: 0 0 0 1px var(--color-ink);
+}
+
+/* --- Inputs --- */
+.text-input {
+  background: var(--color-canvas-elevated);
+  color: var(--color-ink);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--rounded-sm);
+  padding: 10px 14px;
+  font-family: inherit;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.15s;
+  width: 100%;
+}
+.text-input:focus { border-color: var(--color-ink); }
+.text-input::placeholder { color: var(--color-faint); }
+
+/* --- Select --- */
+.select-input {
+  appearance: none;
+  background: var(--color-canvas-elevated);
+  color: var(--color-ink);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--rounded-sm);
+  padding: 10px 36px 10px 14px;
+  font-family: inherit;
+  font-size: 14px;
+  outline: none;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%234d4d4d' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  transition: border-color 0.15s;
+  width: 100%;
+}
+.select-input:focus { border-color: var(--color-ink); }
+
+/* --- Spinner --- */
+.spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--color-hairline);
+  border-top-color: var(--color-ink);
+  border-radius: var(--rounded-full);
+  animation: spin 0.6s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* --- Code --- */
+code {
+  font-family: 'Geist Mono', 'JetBrains Mono', monospace;
+}
+
+/* --- Progress Dots --- */
+.step-progress { display: flex; gap: 6px; }
+.step-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--rounded-full);
+  background: var(--color-hairline);
+  transition: background 0.3s, width 0.3s;
+}
+.step-dot.active { background: var(--color-ink); width: 20px; }
+.step-dot.completed { background: var(--color-ink); }
+
+/* --- Scrollbar --- */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-hairline); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-faint); }

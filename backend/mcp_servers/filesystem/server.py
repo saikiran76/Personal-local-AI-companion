@@ -1,17 +1,17 @@
 """
 MCP FileSystem Server — exposes file system operations as MCP tools.
 
-This server communicates via stdio using the MCP protocol (JSON-RPC).
-In production, use the `mcp` Python package to build proper MCP servers.
+Communicates via stdio using the MCP protocol (JSON-RPC).
+Reads stdin synchronously in a thread to avoid Windows ProactorEventLoop bugs.
 """
 
 import json
-import os
 import sys
+import threading
 from pathlib import Path
 
 
-async def handle_request(request: dict) -> dict:
+def handle_request(request: dict) -> dict:
     """Handle a JSON-RPC request."""
     method = request.get("method", "")
     params = request.get("params", {})
@@ -124,26 +124,26 @@ async def handle_request(request: dict) -> dict:
     }
 
 
-async def main():
-    """Run the MCP server over stdio."""
-    reader = asyncio.StreamReader()
-    protocol = asyncio.StreamReaderProtocol(reader)
-    await asyncio.get_event_loop().connect_read_pipe(lambda: protocol, sys.stdin)
-
-    while True:
-        line = await reader.readline()
+def main():
+    """Run the MCP server over stdio — synchronous reads to avoid ProactorEventLoop."""
+    # Read lines from stdin synchronously in the main thread.
+    # This avoids connect_read_pipe() which crashes on Windows ProactorEventLoop.
+    for line in sys.stdin:
+        line = line.strip()
         if not line:
-            break
-
+            continue
         try:
-            request = json.loads(line.decode().strip())
-            response = await handle_request(request)
+            request = json.loads(line)
+            response = handle_request(request)
             sys.stdout.write(json.dumps(response) + "\n")
             sys.stdout.flush()
         except json.JSONDecodeError:
             continue
+        except BrokenPipeError:
+            break
+        except Exception:
+            break
 
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()

@@ -35,8 +35,10 @@ const BACKEND = {
  * SSE format: "event: name\ndata: json\n\n"
  */
 function parseSSE(buffer) {
+  // Normalize Windows \r\n to \n so split('\n\n') works reliably
+  const normalized = buffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   const events = [];
-  const parts = buffer.split('\n\n');
+  const parts = normalized.split('\n\n');
 
   // Last part might be incomplete
   const complete = parts.slice(0, -1);
@@ -48,10 +50,10 @@ function parseSSE(buffer) {
     let data = '';
 
     for (const line of block.split('\n')) {
-      if (line.startsWith('event: ')) {
-        eventType = line.slice(7).trim();
-      } else if (line.startsWith('data: ')) {
-        data = line.slice(6);
+      if (line.startsWith('event:')) {
+        eventType = line.slice(6).trim();
+      } else if (line.startsWith('data:')) {
+        data = line.slice(5).trim();
       }
     }
 
@@ -76,7 +78,9 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
   const [modelInfo, setModelInfo] = useState(null);
   const [modelAvailable, setModelAvailable] = useState(false);
   const [activeTool, setActiveTool] = useState(null); // currently executing tool
+  const [isThinking, setIsThinking] = useState(false); // model is generating (pre-tool)
   const [showImportModal, setShowImportModal] = useState(false);
+  const [modelAdvisor, setModelAdvisor] = useState(null); // upgrade recommendation
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
   const eventSourceRef = useRef(null);
@@ -87,7 +91,7 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isStreaming, activeTool]);
+  }, [messages, isStreaming, activeTool, isThinking]);
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -143,6 +147,16 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
       onModelAvailable?.(available);
       setStatusMessage('');
       console.log('Backend ready, tools:', data.tools, 'model_available:', data.model_available);
+
+      // Fetch model advisor recommendation
+      fetch(`${BACKEND_URL}/models/advise`)
+        .then((r) => r.json())
+        .then((data) => {
+          if (data.upgrade) {
+            setModelAdvisor(data.upgrade);
+          }
+        })
+        .catch(() => {});
     });
 
     eventSource.addEventListener('model_error', (e) => {
@@ -184,6 +198,8 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
     setMessages((prev) => [...prev, userMsg]);
     setInput('');
     setIsStreaming(true);
+    setIsThinking(false);
+    setActiveTool(null);
 
     // If backend is ready but no model, guide user to upload
     if ((backendStatus === BACKEND.READY || backendStatus === BACKEND.ERROR) && !modelAvailable) {
@@ -204,6 +220,8 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
       timestamp: new Date(),
     };
 
+    console.log('streamed agent message from backend: ', assistantMsg)
+
     setMessages((prev) => [...prev, assistantMsg]);
 
     try {
@@ -217,98 +235,127 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
         signal: controller.signal,
       });
 
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      if (!response.body) {
+        throw new Error('Response body is null — backend may not support streaming');
+      }
+
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let sseBuffer = '';
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        sseBuffer += decoder.decode(value, { stream: true });
-        const { events, leftover } = parseSSE(sseBuffer);
-        sseBuffer = leftover;
+          sseBuffer += decoder.decode(value, { stream: true });
+          const { events, leftover } = parseSSE(sseBuffer);
+          sseBuffer = leftover;
 
-        for (const event of events) {
-          switch (event.type) {
-            case 'token':
-              // Append streaming token to the last assistant message
-              if (event.data.content) {
+          for (const event of events) {
+            switch (event.type) {
+              case 'token':
+                setIsThinking(false);
+                if (event.data.content) {
+                  setMessages((prev) => {
+                    const updated = [...prev];
+                    const last = updated[updated.length - 1];
+                    if (last.role === 'assistant') {
+                      last.content += event.data.content;
+                    }
+                    return updated;
+                  });
+                }
+                break;
+
+              case 'thinking':
+                setIsThinking(true);
+                break;
+
+              case 'clear':
                 setMessages((prev) => {
                   const updated = [...prev];
                   const last = updated[updated.length - 1];
                   if (last.role === 'assistant') {
-                    last.content += event.data.content;
+                    last.content = '';
+                    last.toolCalls = [];
                   }
                   return updated;
                 });
-              }
-              break;
+                break;
 
-            case 'tool_call':
-              // Show tool call indicator
-              setActiveTool({
-                name: event.data.tool,
-                arguments: event.data.arguments,
-                status: 'running',
-              });
-              setMessages((prev) => {
-                const updated = [...prev];
-                const last = updated[updated.length - 1];
-                if (last.role === 'assistant') {
-                  last.toolCalls = [
-                    ...(last.toolCalls || []),
-                    {
-                      name: event.data.tool,
-                      arguments: event.data.arguments,
-                      status: 'running',
-                    },
-                  ];
-                }
-                return updated;
-              });
-              break;
+              case 'tool_call':
+                setIsThinking(false);
+                setActiveTool({
+                  name: event.data.tool,
+                  arguments: event.data.arguments,
+                  status: 'running',
+                });
+                setMessages((prev) => {
+                  const updated = [...prev];
+                  const last = updated[updated.length - 1];
+                  if (last.role === 'assistant') {
+                    last.toolCalls = [
+                      ...(last.toolCalls || []),
+                      {
+                        name: event.data.tool,
+                        arguments: event.data.arguments,
+                        status: 'running',
+                      },
+                    ];
+                  }
+                  return updated;
+                });
+                break;
 
-            case 'tool_result':
-              // Update tool call status
-              setActiveTool(null);
-              setMessages((prev) => {
-                const updated = [...prev];
-                const last = updated[updated.length - 1];
-                if (last.role === 'assistant' && last.toolCalls?.length > 0) {
-                  const toolCalls = [...last.toolCalls];
-                  const lastTool = toolCalls[toolCalls.length - 1];
-                  toolCalls[toolCalls.length - 1] = {
-                    ...lastTool,
-                    status: 'done',
-                    result: event.data.result,
-                  };
-                  last.toolCalls = toolCalls;
-                }
-                return updated;
-              });
-              break;
+              case 'tool_result':
+                setActiveTool(null);
+                setMessages((prev) => {
+                  const updated = [...prev];
+                  const last = updated[updated.length - 1];
+                  if (last.role === 'assistant' && last.toolCalls?.length > 0) {
+                    const toolCalls = [...last.toolCalls];
+                    const lastTool = toolCalls[toolCalls.length - 1];
+                    toolCalls[toolCalls.length - 1] = {
+                      ...lastTool,
+                      status: 'done',
+                      result: event.data.result,
+                    };
+                    last.toolCalls = toolCalls;
+                  }
+                  return updated;
+                });
+                break;
 
-            case 'done':
-              // Stream complete
-              break;
+              case 'done':
+                setIsThinking(false);
+                setActiveTool(null);
+                break;
 
-            case 'error':
-              setMessages((prev) => {
-                const updated = [...prev];
-                const last = updated[updated.length - 1];
-                if (last.role === 'assistant' && !last.content) {
-                  last.content = `Error: ${event.data.error}`;
-                }
-                return updated;
-              });
-              break;
+              case 'error':
+                setIsThinking(false);
+                setActiveTool(null);
+                setMessages((prev) => {
+                  const updated = [...prev];
+                  const last = updated[updated.length - 1];
+                  if (last.role === 'assistant' && !last.content) {
+                    last.content = `Error: ${event.data.error}`;
+                  }
+                  return updated;
+                });
+                break;
+            }
           }
         }
+      } finally {
+        reader.releaseLock();
       }
     } catch (err) {
       if (err.name !== 'AbortError') {
-        console.error('Stream error:', err);
         setMessages((prev) => {
           const updated = [...prev];
           const last = updated[updated.length - 1];
@@ -320,6 +367,7 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
       }
     } finally {
       setIsStreaming(false);
+      setIsThinking(false);
       setActiveTool(null);
       abortRef.current = null;
     }
@@ -528,6 +576,27 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
               </div>
             )}
 
+            {/* Model upgrade advisor */}
+            {modelAvailable && modelAdvisor && (
+              <div className="chat-advisor-banner">
+                <div className="chat-advisor-icon">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
+                  </svg>
+                </div>
+                <div className="chat-advisor-text">
+                  <span className="chat-advisor-title">Model upgrade recommended</span>
+                  <span className="chat-advisor-desc">
+                    {modelAdvisor.reason}
+                    {' '}Switch to <strong>{modelAdvisor.recommended_model}</strong> for better results.
+                  </span>
+                </div>
+                <button className="chat-no-model-btn" onClick={() => setShowImportModal(true)} style={{ marginLeft: 'auto', flexShrink: 0 }}>
+                  Upgrade model
+                </button>
+              </div>
+            )}
+
             {/* Suggestions (only show when model is available) */}
             {modelAvailable && (
               <div className="chat-suggestions">
@@ -584,8 +653,32 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                   </div>
                 </div>
               ))}
+              
 
-              {/* Active tool indicator */}
+              {/* Thinking indicator — model is generating, no tool yet */}
+              {isThinking && isStreaming && !activeTool && (
+                <div className="message message-assistant">
+                  <div className="message-avatar">
+                    {getAssistantInitial(assistantName)}
+                  </div>
+                  <div className="message-body">
+                    <div className="message-content">
+
+                      <div className="typing-indicator">
+                        <div className="typing-dot" />
+                        <div className="typing-dot" />
+                        <div className="typing-dot" />
+                      
+                      </div>
+                      {/* <div>thinking state: {isThinking}, isStreaming: {isStreaming}, and activeTool: {activeTool ? activeTool.name : 'None'}</div> */}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* console.log('activeTool state: ', activeTool, 'isStreaming state:', isStreaming); */}
+
+              {/* Active tool indicator — tool is executing */}
               {activeTool && isStreaming && (
                 <div className="tool-status-bar">
                   <span className="spinner" style={{ width: 12, height: 12, borderWidth: 1.5 }} />
@@ -593,8 +686,8 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                 </div>
               )}
 
-              {/* Typing indicator */}
-              {isStreaming && !activeTool && (
+              {/* Typing indicator — waiting for backend, not thinking, no tool */}
+              {isStreaming && !isThinking && !activeTool && (
                 <div className="message message-assistant">
                   <div className="message-avatar">
                     {getAssistantInitial(assistantName)}
@@ -625,6 +718,7 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                 rows={1}
                 placeholder={
                   isModelLoading ? 'Model is loading...'
+                  : isThinking ? 'Thinking...'
                   : activeTool ? `${activeTool.name} running...`
                   : `Message ${assistantName}...`
                 }

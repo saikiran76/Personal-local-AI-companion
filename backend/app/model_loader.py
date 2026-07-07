@@ -164,7 +164,19 @@ def detect_compute() -> dict:
 # on CPU (for GPU, VRAM is the constraint — handled separately in _load_gguf).
 
 GGUF_REGISTRY: dict[str, tuple[str, str, int, int]] = {
-    # --- Qwen 2.5 family ---
+    # --- Qwen 2.5 family (best for tool calling) ---
+    "Qwen2.5-1.5B-Q4_K_M": (
+        "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+        "qwen2.5-1.5b-instruct-Q4_K_M.gguf",
+        32768,
+        1100,
+    ),
+    "Qwen2.5-3B-Q4_K_M": (
+        "Qwen/Qwen2.5-3B-Instruct-GGUF",
+        "qwen2.5-3b-instruct-Q4_K_M.gguf",
+        32768,
+        2200,
+    ),
     "Qwen2.5-7B-Q4_K_M": (
         "Qwen/Qwen2.5-7B-Instruct-GGUF",
         "qwen2.5-7b-instruct-Q4_K_M.gguf",
@@ -206,7 +218,7 @@ GGUF_REGISTRY: dict[str, tuple[str, str, int, int]] = {
         2500,
     ),
 
-    # --- SmolLM2 (ultra-light) ---
+    # --- SmolLM2 (ultra-light, poor tool calling) ---
     "SmolLM2-1.7B-Q4_K_M": (
         "HuggingFaceTB/SmolLM2-1.7B-Instruct-GGUF",
         "SmolLM2-1.7B-Instruct-Q4_K_M.gguf",
@@ -218,6 +230,8 @@ GGUF_REGISTRY: dict[str, tuple[str, str, int, int]] = {
 # Friendly aliases — map simple names to the best GGUF variant
 _MODEL_ALIASES: dict[str, str] = {
     # User-facing names → registry keys
+    "qwen2.5-1.5b": "Qwen2.5-1.5B-Q4_K_M",
+    "qwen2.5-3b": "Qwen2.5-3B-Q4_K_M",
     "qwen2.5-7b": "Qwen2.5-7B-Q4_K_M",
     "qwen 2.5 7b": "Qwen2.5-7B-Q4_K_M",
     "llama-3.1-8b": "Llama-3.1-8B-Q4_K_M",
@@ -225,10 +239,10 @@ _MODEL_ALIASES: dict[str, str] = {
     "phi-3.5-mini": "Phi-3.5-Mini-Q4_K_M",
     "phi 3.5 mini": "Phi-3.5-Mini-Q4_K_M",
     "smollm2": "SmolLM2-1.7B-Q4_K_M",
-    "glm-5.2": "Qwen2.5-7B-Q4_K_M",  # alias for the default model
+    "glm-5.2": "Qwen2.5-7B-Q4_K_M",
     "glm5.2": "Qwen2.5-7B-Q4_K_M",
-    "default": "Qwen2.5-7B-Q4_K_M",
-    "auto": "Qwen2.5-7B-Q4_K_M",
+    "default": "Qwen2.5-1.5B-Q4_K_M",
+    "auto": "Qwen2.5-1.5B-Q4_K_M",
     "best": "Qwen2.5-7B-Q4_K_M",
 }
 
@@ -668,3 +682,132 @@ class ModelLoader:
             await asyncio.sleep(0.08 + (time.monotonic() % 0.05))
             yield token
         yield json.dumps({"finish_reason": "stop"})
+
+
+# ---------------------------------------------------------------------------
+# Model Advisor — recommend models based on hardware
+# ---------------------------------------------------------------------------
+
+# Models known to support tool calling well (fine-tuned on instruction/tool datasets)
+_TOOL_CAPABLE_FAMILIES = ["qwen2.5", "llama-3.1", "phi-3.5"]
+
+# Models known to be poor at tool calling (too small or not instruction-tuned)
+_TOOL_WEAK_FAMILIES = ["smollm2"]
+
+
+def get_model_tool_capability(model_name: str) -> str:
+    """Return 'good', 'weak', or 'unknown' for tool calling ability."""
+    lower = model_name.lower()
+    for family in _TOOL_CAPABLE_FAMILIES:
+        if family in lower:
+            return "good"
+    for family in _TOOL_WEAK_FAMILIES:
+        if family in lower:
+            return "weak"
+    return "unknown"
+
+
+def get_model_family(model_name: str) -> str:
+    """Extract the model family name (e.g. 'Qwen2.5-7B' from 'Qwen2.5-7B-Q4_K_M')."""
+    for prefix in ["Qwen2.5", "Llama-3.1", "Phi-3.5", "SmolLM2"]:
+        if prefix.lower() in model_name.lower():
+            # Find the size indicator (check longer patterns first to avoid "7B" matching "1.7B")
+            for size in ["1.5B", "1.7B", "3B", "7B", "8B"]:
+                if size in model_name:
+                    return f"{prefix}-{size}"
+    return model_name.split("-Q")[0] if "-Q" in model_name else model_name
+
+
+def advise_model_upgrade(current_model: str, compute: dict) -> dict | None:
+    """
+    Check if the user should upgrade their model for better tool calling.
+
+    Returns a recommendation dict or None if current model is fine.
+    """
+    capability = get_model_tool_capability(current_model)
+    tier = compute.get("tier", "low")
+    ram_mb = compute.get("ram_mb", 0)
+    vram_mb = compute.get("vram_mb", 0)
+
+    if capability == "good":
+        return None  # Current model is fine
+
+    # Find the best model for this hardware that supports tool calling
+    candidates = []
+    for name, (repo, filename, ctx, ram_req) in GGUF_REGISTRY.items():
+        cap = get_model_tool_capability(name)
+        if cap != "good":
+            continue
+        effective = max(vram_mb, ram_mb)
+        # Need 40% headroom for OS + other processes
+        if effective >= ram_req * 1.4:
+            candidates.append((name, ram_req))
+
+    if not candidates:
+        return None
+
+    # Pick the best model that fits
+    # For low-tier hardware, prefer smaller models that leave headroom
+    if tier == "low":
+        candidates.sort(key=lambda x: x[1])  # smallest first
+    else:
+        candidates.sort(key=lambda x: x[1], reverse=True)  # largest first
+    best_name = candidates[0][0]
+    best_ram = candidates[0][1]
+    family = get_model_family(best_name)
+
+    reason = ""
+    if "smollm" in current_model.lower():
+        reason = (
+            f"Your current model ({current_model}) is too small for reliable tool calling. "
+            f"SmolLM2 models excel at text completion but lack the instruction-following "
+            f"needed for structured tool use."
+        )
+    else:
+        reason = (
+            f"Your current model ({current_model}) may not support tool calling well. "
+            f"Upgrading to a Qwen2.5 model will give you much better results."
+        )
+
+    return {
+        "current_model": current_model,
+        "recommended_model": best_name,
+        "family": family,
+        "reason": reason,
+        "ram_required_mb": best_ram,
+        "ram_available_mb": ram_mb,
+        "fits": True,
+    }
+
+
+def list_upgrade_options(compute: dict) -> list[dict]:
+    """List all models that could run on this hardware, sorted by capability."""
+    ram_mb = compute.get("ram_mb", 0)
+    vram_mb = compute.get("vram_mb", 0)
+    effective = max(vram_mb, ram_mb)
+    tier = compute.get("tier", "low")
+
+    options = []
+    for name, (repo, filename, ctx, ram_req) in GGUF_REGISTRY.items():
+        # Need 40% headroom for OS + other processes
+        if effective >= ram_req * 1.4:
+            cap = get_model_tool_capability(name)
+            family = get_model_family(name)
+            options.append({
+                "name": name,
+                "filename": filename,
+                "repo": repo,
+                "family": family,
+                "context": ctx,
+                "ram_required_mb": ram_req,
+                "tool_capability": cap,
+                "fits": True,
+            })
+
+    # Sort: tool-capable first, then by fit quality (largest that fits well)
+    # For lower-tier hardware, prefer smaller models that leave headroom
+    if tier == "low":
+        options.sort(key=lambda x: (0 if x["tool_capability"] == "good" else 1, x["ram_required_mb"]))
+    else:
+        options.sort(key=lambda x: (0 if x["tool_capability"] == "good" else 1, -x["ram_required_mb"]))
+    return options

@@ -1,5 +1,8 @@
 """
 MCP Notes Server — manages user notes as an MCP tool server.
+
+Communicates via stdio using the MCP protocol (JSON-RPC).
+Reads stdin synchronously to avoid Windows ProactorEventLoop bugs.
 """
 
 import json
@@ -10,7 +13,7 @@ from pathlib import Path
 NOTES_DIR = Path.home() / ".desktop-companion" / "notes"
 
 
-async def handle_request(request: dict) -> dict:
+def handle_request(request: dict) -> dict:
     method = request.get("method", "")
     params = request.get("params", {})
     req_id = request.get("id")
@@ -117,6 +120,24 @@ async def handle_request(request: dict) -> dict:
                 },
             }
 
+        elif tool_name == "delete_note":
+            note_id = arguments.get("note_id", "")
+            note_path = NOTES_DIR / f"{note_id}.md"
+            if note_path.exists():
+                note_path.unlink()
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "content": [{"type": "text", "text": f"Deleted note: {note_id}"}],
+                    },
+                }
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -1, "message": f"Note not found: {note_id}"},
+            }
+
     return {
         "jsonrpc": "2.0",
         "id": req_id,
@@ -124,23 +145,24 @@ async def handle_request(request: dict) -> dict:
     }
 
 
+def main():
+    """Run the MCP server over stdio — synchronous reads."""
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+            response = handle_request(request)
+            sys.stdout.write(json.dumps(response) + "\n")
+            sys.stdout.flush()
+        except json.JSONDecodeError:
+            continue
+        except BrokenPipeError:
+            break
+        except Exception:
+            break
+
+
 if __name__ == "__main__":
-    import asyncio
-
-    async def main():
-        reader = asyncio.StreamReader()
-        protocol = asyncio.StreamReaderProtocol(reader)
-        await asyncio.get_event_loop().connect_read_pipe(lambda: protocol, sys.stdin)
-        while True:
-            line = await reader.readline()
-            if not line:
-                break
-            try:
-                request = json.loads(line.decode().strip())
-                response = await handle_request(request)
-                sys.stdout.write(json.dumps(response) + "\n")
-                sys.stdout.flush()
-            except json.JSONDecodeError:
-                continue
-
-    asyncio.run(main())
+    main()

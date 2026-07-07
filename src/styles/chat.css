@@ -276,6 +276,50 @@
   opacity: 0.85;
 }
 
+/* --- Model Advisor Banner --- */
+.chat-advisor-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  background: #fef3c7;
+  border: 1px solid #f59e0b;
+  border-radius: var(--radius-md);
+  padding: 16px;
+  margin-top: var(--spacing-md);
+  max-width: 560px;
+  text-align: left;
+}
+
+.chat-advisor-icon {
+  color: #d97706;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.chat-advisor-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+}
+
+.chat-advisor-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #92400e;
+}
+
+.chat-advisor-desc {
+  font-size: 12px;
+  color: #a16207;
+  line-height: 1.4;
+}
+
+.chat-advisor-desc strong {
+  color: #92400e;
+  font-weight: 600;
+}
+
 /* --- Messages Area --- */
 .chat-messages {
   flex: 1;

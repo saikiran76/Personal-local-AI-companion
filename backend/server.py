@@ -18,6 +18,31 @@ from app.model_loader import ModelLoader
 from app.agent import AgentOrchestrator
 from app.routes import router
 
+# --- Monkey-patch for Python 3.13 Windows bug ---
+# _ProactorReadPipeTransport._force_close() references self._empty_waiter
+# which doesn't exist on that class. Patch it so a dead pipe doesn't crash
+# the entire server.
+if sys.platform == "win32":
+    try:
+        import asyncio.proactor_events as _pe
+
+        _orig_force_close = _pe._ProactorReadPipeTransport._force_close
+
+        def _patched_force_close(self, exc=None):
+            if not hasattr(self, "_empty_waiter"):
+                self._empty_waiter = None
+            _orig_force_close(self, exc)
+
+        _pe._ProactorReadPipeTransport._force_close = _patched_force_close
+        logging.getLogger("backend").info(
+            "Applied asyncio ProactorEventLoop monkey-patch for _empty_waiter bug"
+        )
+    except Exception as e:
+        logging.getLogger("backend").warning(
+            "Failed to apply ProactorEventLoop patch: %s", e
+        )
+# --- End monkey-patch ---
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -46,8 +71,6 @@ async def startup():
     """On startup: load config, signal Electron we're alive."""
     config = load_config()
     logger.info("Config loaded: %s", config)
-    # Emit startup event so Electron knows backend is ready
-    # Model loading happens on first /chat request (lazy)
 
 
 @app.on_event("shutdown")

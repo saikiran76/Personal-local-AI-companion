@@ -10,10 +10,14 @@ from pathlib import Path
 from fastapi import APIRouter, Request, UploadFile, File
 from sse_starlette.sse import EventSourceResponse
 
-from .model_loader import ModelLoader, ModelStatus, GGUF_REGISTRY, DEFAULT_MODEL_DIR
+from .model_loader import (
+    ModelLoader, ModelStatus, GGUF_REGISTRY, DEFAULT_MODEL_DIR,
+    detect_compute, advise_model_upgrade, list_upgrade_options,
+    get_model_tool_capability, get_model_family,
+)
 from .agent import AgentOrchestrator
 from .mcp_client import MCPClientManager
-from .config import load_config
+from .config import load_config, save_config
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -21,6 +25,7 @@ router = APIRouter()
 _model_loader: ModelLoader | None = None
 _mcp_manager = MCPClientManager()
 _agent: AgentOrchestrator | None = None
+_pending_model_path: str | None = None  # set by import to trigger reload on next connect
 
 
 @router.get("/health")
@@ -72,41 +77,62 @@ async def events(request: Request):
 
     Events:
       connected, model_loading, model_ready, model_error, backend_ready
+
+    Detects pending model switch from import endpoint and reloads.
     """
+    global _model_loader, _agent, _pending_model_path
+
     config = load_config()
 
     async def event_generator():
-        global _model_loader, _agent
+        global _model_loader, _agent, _pending_model_path
 
         yield {
             "event": "connected",
             "data": json.dumps({"message": "Backend connected"}),
         }
 
-        # Reuse existing ModelLoader if already loaded, otherwise create new one
-        if _model_loader is None or not _model_loader.is_ready:
+        # --- Check if a model switch was requested by the import endpoint ---
+        needs_reload = False
+        if _pending_model_path is not None:
+            logger.info("Pending model switch detected: %s", _pending_model_path)
+            # Unload the old model
+            if _model_loader is not None:
+                _model_loader.unload()
+                logger.info("Unloaded previous model")
+            _model_loader = None
+            _agent = None  # agent references old model, must recreate
+            needs_reload = True
+
+        # --- Create loader if needed ---
+        if _model_loader is None:
             _model_loader = ModelLoader()
 
-        # Only attempt model load if not already loaded
-        if not _model_loader.is_ready:
+        # --- Load model if not ready or if a switch was requested ---
+        if not _model_loader.is_ready or needs_reload:
+            # Determine what model to load
+            model_name = config.model
+            model_path = _pending_model_path  # use pending path if available
+
             if config.ai_preference == "local":
                 yield {
                     "event": "model_loading",
                     "data": json.dumps({
-                        "model": config.model,
-                        "message": f"Loading {config.model}...",
+                        "model": model_name,
+                        "message": f"Loading {model_name}...",
                     }),
                 }
 
-                model_info = await _model_loader.load(config.model, config.model_path)
+                model_info = await _model_loader.load(model_name, model_path)
             else:
-                # Non-local mode: go straight to mock
                 model_info = _model_loader.info
                 model_info.status = ModelStatus.READY
                 model_info.is_mock = True
                 model_info.quantization = "mock"
+
+            # Clear pending switch after load attempt
+            _pending_model_path = None
         else:
-            # Model already loaded from previous connection or import
             model_info = _model_loader.info
             logger.info("Reusing existing model: %s", model_info.name)
 
@@ -205,7 +231,7 @@ async def chat(request: Request):
     Streaming chat endpoint. Streams AgentEvents via SSE.
 
     Request:  { "message": "user prompt" }
-    Events:   token, tool_call, tool_result, done, error
+    Events:   token, clear, thinking, tool_call, tool_result, done, error
     """
     body = await request.json()
     user_message = body.get("message", "")
@@ -224,6 +250,13 @@ async def chat(request: Request):
                         "event": "token",
                         "data": json.dumps({"content": event.content}),
                     }
+                elif event.type == "thinking":
+                    yield {
+                        "event": "thinking",
+                        "data": json.dumps({"content": event.content}),
+                    }
+                elif event.type == "clear":
+                    yield {"event": "clear", "data": json.dumps({})}
                 elif event.type == "tool_call":
                     yield {
                         "event": "tool_call",
@@ -241,6 +274,9 @@ async def chat(request: Request):
                             "result": event.tool_result,
                         }),
                     }
+                    # Send immediate ping to keep connection alive during next round
+                    await asyncio.sleep(0.01)  # flush event
+                    yield {"event": "ping", "data": "{}"}
                 elif event.type == "done":
                     yield {"event": "done", "data": json.dumps({})}
                 elif event.type == "error":
@@ -310,8 +346,10 @@ async def list_models():
 async def import_model(file: UploadFile = File(...)):
     """
     Import a .gguf model file by uploading it.
-    Copies the file to the hidden models directory.
+    Copies the file to the models directory and triggers a model reload on next connect.
     """
+    global _model_loader, _agent, _pending_model_path
+
     if not file.filename or not file.filename.endswith(".gguf"):
         return {"error": "Only .gguf files are supported", "success": False}
 
@@ -322,6 +360,14 @@ async def import_model(file: UploadFile = File(...)):
     # Skip if already exists
     if dest_path.exists():
         size_mb = dest_path.stat().st_size // (1024 * 1024)
+        # Even if the file exists, if it's a different model than what's loaded, trigger reload
+        if _model_loader and _model_loader.is_ready:
+            loaded_path = Path(_model_loader.info.model_path) if _model_loader.info.model_path else None
+            if loaded_path and loaded_path.resolve() != dest_path.resolve():
+                logger.info("Same filename exists but different model is loaded — triggering reload")
+                _pending_model_path = str(dest_path)
+                _model_loader.unload()
+                _agent = None
         return {
             "success": True,
             "skipped": True,
@@ -343,11 +389,30 @@ async def import_model(file: UploadFile = File(...)):
         size_mb = dest_path.stat().st_size // (1024 * 1024)
         logger.info("Imported model: %s (%d MB)", file.filename, size_mb)
 
-        # Signal that a re-handshake is needed to load the new model
-        # Do NOT touch ModelLoader here - it would conflict with the SSE stream
+        # --- Trigger model switch on next /events reconnect ---
+        # Unload the current model so the loader is no longer "ready"
+        if _model_loader is not None and _model_loader.is_ready:
+            old_name = _model_loader.info.name
+            _model_loader.unload()
+            _agent = None  # agent references old model, must recreate
+            logger.info("Unloaded old model '%s' to make way for new import", old_name)
+
+        # Set the pending path so /events knows to load this specific file
+        _pending_model_path = str(dest_path)
+
+        # Update config so the model name persists across restarts
+        try:
+            config = load_config()
+            config.model = dest_path.stem
+            save_config(config)
+            logger.info("Updated config model to: %s", dest_path.stem)
+        except Exception as e:
+            logger.warning("Failed to update config: %s", e)
+
         return {
             "success": True,
             "skipped": False,
+            "model_loaded": False,  # will be loaded on next /events reconnect
             "model": {
                 "name": dest_path.stem,
                 "filename": file.filename,
@@ -361,6 +426,101 @@ async def import_model(file: UploadFile = File(...)):
             dest_path.unlink()
         logger.error("Model import failed: %s", e)
         return {"error": str(e), "success": False}
+
+
+@router.post("/models/switch")
+async def switch_model(request: Request):
+    """
+    Switch to a different model by name or file path.
+    Unloads current model and loads the new one on next /events reconnect.
+    """
+    global _model_loader, _agent, _pending_model_path
+
+    body = await request.json()
+    model_name = body.get("model", "")
+    model_path = body.get("path")
+
+    if not model_name and not model_path:
+        return {"error": "Provide 'model' name or 'path' to a .gguf file"}
+
+    # Find the file path if only a name was given
+    if model_path:
+        dest_path = Path(model_path)
+    else:
+        models_dir = Path(DEFAULT_MODEL_DIR)
+        # Check registry first
+        if model_name in GGUF_REGISTRY:
+            _, filename, _, _ = GGUF_REGISTRY[model_name]
+            dest_path = models_dir / filename
+        else:
+            # Try as-is, then with .gguf extension
+            dest_path = models_dir / model_name
+            if not dest_path.exists():
+                dest_path = models_dir / f"{model_name}.gguf"
+            if not dest_path.exists():
+                # Scan for partial match
+                for f in models_dir.glob("*.gguf"):
+                    if model_name.lower() in f.stem.lower():
+                        dest_path = f
+                        break
+
+    if not dest_path.exists():
+        return {"error": f"Model file not found: {dest_path}", "success": False}
+
+    # Unload current model
+    if _model_loader is not None and _model_loader.is_ready:
+        old_name = _model_loader.info.name
+        _model_loader.unload()
+        _agent = None
+        logger.info("Unloaded model '%s' for switch to '%s'", old_name, dest_path.stem)
+
+    # Set pending path and update config
+    _pending_model_path = str(dest_path)
+
+    try:
+        config = load_config()
+        config.model = dest_path.stem
+        save_config(config)
+    except Exception as e:
+        logger.warning("Failed to update config: %s", e)
+
+    return {
+        "success": True,
+        "model": {
+            "name": dest_path.stem,
+            "path": str(dest_path),
+        },
+        "message": f"Model switch to '{dest_path.stem}' queued. Reconnect to load.",
+    }
+
+
+@router.get("/models/advise")
+async def advise_model():
+    """
+    Check if the current model should be upgraded for better tool calling.
+    Returns upgrade recommendation based on hardware and current model.
+    """
+    if _model_loader is None:
+        return {"upgrade": None, "compute": detect_compute()}
+
+    compute = _model_loader.compute
+    current = _model_loader.info.name
+    upgrade = advise_model_upgrade(current, compute)
+    return {
+        "current_model": current,
+        "tool_capability": get_model_tool_capability(current),
+        "family": get_model_family(current),
+        "upgrade": upgrade,
+        "compute": compute,
+    }
+
+
+@router.get("/models/upgrade-options")
+async def upgrade_options():
+    """List all models that could run on this hardware, sorted by capability."""
+    compute = detect_compute() if _model_loader is None else _model_loader.compute
+    options = list_upgrade_options(compute)
+    return {"options": options, "compute": compute}
 
 
 @router.post("/shutdown")

@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import ImportModelModal from '../components/ImportModelModal';
 
 const BACKEND_URL = 'http://127.0.0.1:8765';
 
@@ -73,7 +74,9 @@ export default function ChatScreen({ config, onReset }) {
   const [backendStatus, setBackendStatus] = useState(BACKEND.DISCONNECTED);
   const [statusMessage, setStatusMessage] = useState('');
   const [modelInfo, setModelInfo] = useState(null);
+  const [modelAvailable, setModelAvailable] = useState(false);
   const [activeTool, setActiveTool] = useState(null); // currently executing tool
+  const [showImportModal, setShowImportModal] = useState(false);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
   const eventSourceRef = useRef(null);
@@ -121,20 +124,33 @@ export default function ChatScreen({ config, onReset }) {
     eventSource.addEventListener('model_ready', (e) => {
       const data = JSON.parse(e.data);
       setModelInfo(data);
-      setStatusMessage(`Model loaded on ${data.device}`);
+      setModelAvailable(data.model_available !== false);
+      setStatusMessage(data.model_available === false
+        ? 'No model file found. Import a .gguf model to enable AI.'
+        : `Model loaded on ${data.device}`
+      );
     });
 
     eventSource.addEventListener('backend_ready', (e) => {
       const data = JSON.parse(e.data);
       setBackendStatus(BACKEND.READY);
+      setModelAvailable(data.model_available !== false);
       setStatusMessage('');
-      console.log('Backend ready, tools:', data.tools);
+      console.log('Backend ready, tools:', data.tools, 'model_available:', data.model_available);
     });
 
     eventSource.addEventListener('model_error', (e) => {
       const data = JSON.parse(e.data);
-      setBackendStatus(BACKEND.ERROR);
+      setModelAvailable(false);
       setStatusMessage(`Model error: ${data.error}`);
+      // Don't set ERROR status — backend will still send backend_ready
+      // This keeps the app usable even when model fails
+    });
+
+    eventSource.addEventListener('model_missing', (e) => {
+      const data = JSON.parse(e.data);
+      setModelAvailable(false);
+      setStatusMessage(data.message || 'No model file found. Import a .gguf model to enable AI.');
     });
 
     eventSource.addEventListener('ping', () => {});
@@ -161,7 +177,10 @@ export default function ChatScreen({ config, onReset }) {
     setInput('');
     setIsStreaming(true);
 
-    if (backendStatus === BACKEND.READY) {
+    // If backend is ready but no model, guide user to upload
+    if ((backendStatus === BACKEND.READY || backendStatus === BACKEND.ERROR) && !modelAvailable) {
+      await noModelResponse(trimmed);
+    } else if (backendStatus === BACKEND.READY) {
       await streamFromBackend(trimmed);
     } else {
       await mockResponse(trimmed);
@@ -329,6 +348,44 @@ export default function ChatScreen({ config, onReset }) {
     setIsStreaming(false);
   };
 
+  const noModelResponse = async (userMessage) => {
+    // Intelligent responses based on what the user asked
+    const lower = userMessage.toLowerCase();
+    let response;
+
+    if (lower.includes('upload') || lower.includes('import') || lower.includes('model') || lower.includes('gguf')) {
+      response = `I'd love to help with that! To get started, I need a model file first.\n\nClick the "Import model" button in the sidebar to upload a .gguf model file from your computer. Once imported, I'll be able to run entirely on your device with full privacy.`;
+    } else if (lower.includes('hello') || lower.includes('hi') || lower.includes('hey')) {
+      response = `Hey! I'm here, but I'm running without a model loaded yet. I can still guide you around the app.\n\nTo unlock my full capabilities, click "Import model" in the sidebar and select a .gguf model file.`;
+    } else if (lower.includes('help') || lower.includes('what can you do')) {
+      response = `Right now I'm in a limited state because no AI model is loaded. Once you import a model, I can:\n\n- Answer questions using a local LLM\n- Manage your files and notes\n- Automate browser tasks\n- All processing happens on your device\n\nClick "Import model" in the sidebar to get started.`;
+    } else {
+      response = `I received your message, but I can't process it without a model loaded.\n\nTo enable local AI inference, please import a .gguf model file:\n\n1. Click "Import model" in the sidebar\n2. Select a .gguf file from your computer\n3. The model will be loaded automatically\n\nOnce a model is imported, I'll be able to respond to your messages using local processing.`;
+    }
+
+    const assistantMsg = {
+      id: Date.now() + 1,
+      role: 'assistant',
+      content: '',
+      toolCalls: [],
+      timestamp: new Date(),
+    };
+    setMessages((prev) => [...prev, assistantMsg]);
+
+    // Stream the response character by character
+    for (let i = 0; i < response.length; i += 3) {
+      await new Promise((r) => setTimeout(r, 12));
+      const chunk = response.slice(0, i + 3);
+      setMessages((prev) => {
+        const updated = [...prev];
+        const last = updated[updated.length - 1];
+        if (last.role === 'assistant') last.content = chunk;
+        return updated;
+      });
+    }
+    setIsStreaming(false);
+  };
+
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -354,6 +411,12 @@ export default function ChatScreen({ config, onReset }) {
           <button className="sidebar-new-chat" onClick={() => setMessages([])}>
             <span>+</span>
             <span>New chat</span>
+          </button>
+          <button className="sidebar-import-model" onClick={() => setShowImportModal(true)}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            <span>Import model</span>
           </button>
         </div>
 
@@ -386,8 +449,19 @@ export default function ChatScreen({ config, onReset }) {
           <span className="chat-header-title">{assistantName}</span>
           <div className="chat-header-actions">
             {modelInfo && (
-              <span className="chat-header-btn" style={{ width: 'auto', padding: '0 10px', fontSize: 11, fontFamily: "'Geist Mono', monospace" }}>
-                {modelInfo.device}
+              <span
+                className={`chat-header-btn ${!modelAvailable ? 'chat-header-btn-warning' : ''}`}
+                style={{ width: 'auto', padding: '0 10px', fontSize: 11, fontFamily: "'Geist Mono', monospace" }}
+                title={!modelAvailable ? 'No model loaded - click Import model in sidebar' : `Running on ${modelInfo.device}`}
+              >
+                {!modelAvailable ? (
+                  <>
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 4 }}>
+                      <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+                    </svg>
+                    no model
+                  </>
+                ) : modelInfo.quantization === 'mock' ? 'mock' : modelInfo.device}
               </span>
             )}
             <button className="chat-header-btn" title="Search">
@@ -414,8 +488,10 @@ export default function ChatScreen({ config, onReset }) {
             <div className="chat-empty-icon">&#x2728;</div>
             <h2 className="chat-empty-title">Hi, {userName}</h2>
             <p className="chat-empty-subtitle">
-              {backendStatus === BACKEND.READY
+              {backendStatus === BACKEND.READY && modelAvailable
                 ? `I'm ${assistantName}, powered by ${modelInfo?.model || 'local AI'}. How can I help?`
+                : backendStatus === BACKEND.READY && !modelAvailable
+                ? `I'm ${assistantName}, ready to help. Import a model to get started.`
                 : `I'm ${assistantName}, your local AI assistant. How can I help today?`
               }
             </p>
@@ -424,14 +500,37 @@ export default function ChatScreen({ config, onReset }) {
                 {statusMessage}
               </p>
             )}
-            <div className="chat-suggestions">
-              {SUGGESTIONS.map((s) => (
-                <button key={s.label} className="chat-suggestion" onClick={() => handleSuggestion(s.label)}>
-                  <div className="chat-suggestion-label">{s.label}</div>
-                  {s.desc}
+
+            {/* No model prompt */}
+            {(backendStatus === BACKEND.READY || backendStatus === BACKEND.ERROR) && !modelAvailable && (
+              <div className="chat-no-model-prompt">
+                <div className="chat-no-model-icon">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+                  </svg>
+                </div>
+                <p className="chat-no-model-text">No model loaded yet</p>
+                <p className="chat-no-model-hint">Import a .gguf model file to enable local AI inference</p>
+                <button className="chat-no-model-btn" onClick={() => setShowImportModal(true)}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+                  </svg>
+                  Import model
                 </button>
-              ))}
-            </div>
+              </div>
+            )}
+
+            {/* Suggestions (only show when model is available) */}
+            {modelAvailable && (
+              <div className="chat-suggestions">
+                {SUGGESTIONS.map((s) => (
+                  <button key={s.label} className="chat-suggestion" onClick={() => handleSuggestion(s.label)}>
+                    <div className="chat-suggestion-label">{s.label}</div>
+                    {s.desc}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         ) : (
           /* Messages */
@@ -548,6 +647,17 @@ export default function ChatScreen({ config, onReset }) {
           </div>
         </div>
       </div>
+
+      {/* Import Model Modal */}
+      {showImportModal && (
+        <ImportModelModal
+          onClose={() => setShowImportModal(false)}
+          onImported={(models) => {
+            console.log('Models imported:', models);
+            setShowImportModal(false);
+          }}
+        />
+      )}
     </div>
   );
 }

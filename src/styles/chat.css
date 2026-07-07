@@ -202,6 +202,80 @@
   color: var(--color-ink);
 }
 
+.chat-header-btn-warning {
+  color: #b45309;
+  border-color: #fbbf24;
+  background: #fef3c7;
+}
+
+.theme-dark .chat-header-btn-warning {
+  color: #fbbf24;
+  border-color: #92400e;
+  background: #1a1005;
+}
+
+/* --- No Model Prompt --- */
+.chat-no-model-prompt {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin-top: var(--spacing-lg);
+  padding: var(--spacing-xl);
+  background: var(--color-canvas-elevated);
+  border: 1px dashed var(--color-hairline);
+  border-radius: var(--rounded-md);
+  max-width: 360px;
+  width: 100%;
+}
+
+.chat-no-model-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--rounded-full);
+  background: var(--color-hairline-soft);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-faint);
+}
+
+.chat-no-model-text {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-ink);
+  margin: 0;
+}
+
+.chat-no-model-hint {
+  font-size: 13px;
+  color: var(--color-faint);
+  margin: 0;
+  text-align: center;
+  line-height: 1.4;
+}
+
+.chat-no-model-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background: var(--color-ink);
+  color: var(--color-canvas);
+  border: none;
+  border-radius: var(--rounded-sm);
+  font-family: 'Geist', sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s;
+  margin-top: var(--spacing-xs);
+}
+
+.chat-no-model-btn:hover {
+  opacity: 0.85;
+}
+
 /* --- Messages Area --- */
 .chat-messages {
   flex: 1;
@@ -572,4 +646,335 @@
   background: var(--color-hairline-soft);
   border-radius: var(--rounded-sm);
   width: fit-content;
+}
+
+/* --- Sidebar Import Model Button --- */
+.sidebar-import-model {
+  width: 100%;
+  background: transparent;
+  color: var(--color-body);
+  border: 1px dashed var(--color-hairline);
+  border-radius: var(--rounded-sm);
+  padding: 8px 12px;
+  font-family: 'Geist', sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  margin-top: var(--spacing-xs);
+}
+
+.sidebar-import-model:hover {
+  background: var(--color-hairline-soft);
+  border-color: var(--color-faint);
+  color: var(--color-ink);
+}
+
+/* --- Import Modal Overlay --- */
+.import-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: fadeIn 0.15s ease-out;
+}
+
+.import-modal {
+  background: var(--color-canvas);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--rounded-lg);
+  width: 440px;
+  max-width: 90vw;
+  max-height: 85vh;
+  overflow: hidden;
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.2);
+  animation: slideUp 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.import-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--spacing-md) var(--spacing-lg);
+  border-bottom: 1px solid var(--color-hairline);
+}
+
+.import-modal-header h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-ink);
+  margin: 0;
+}
+
+.import-modal-close {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--color-body);
+  border: none;
+  border-radius: var(--rounded-sm);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.import-modal-close:hover {
+  background: var(--color-hairline-soft);
+  color: var(--color-ink);
+}
+
+.import-modal-body {
+  padding: var(--spacing-lg);
+}
+
+/* --- Dropzone --- */
+.import-dropzone {
+  border: 2px dashed var(--color-hairline);
+  border-radius: var(--rounded-md);
+  padding: var(--spacing-3xl) var(--spacing-lg);
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.import-dropzone:hover {
+  border-color: var(--color-faint);
+  background: var(--color-hairline-soft);
+}
+
+.import-dropzone-active {
+  border-color: var(--color-primary);
+  background: var(--color-primary-soft, rgba(0, 0, 0, 0.03));
+}
+
+.import-dropzone-selected {
+  border-style: solid;
+  border-color: var(--color-hairline);
+  background: var(--color-hairline-soft);
+  padding: var(--spacing-xl) var(--spacing-lg);
+}
+
+.import-dropzone-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.import-dropzone-icon {
+  color: var(--color-faint);
+  margin-bottom: var(--spacing-xs);
+}
+
+.import-dropzone-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-ink);
+  margin: 0;
+}
+
+.import-dropzone-subtitle {
+  font-size: 13px;
+  color: var(--color-faint);
+  margin: 0;
+}
+
+/* --- Selected File --- */
+.import-file-info {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--spacing-xs);
+}
+
+.import-file-icon {
+  color: var(--color-body);
+  margin-bottom: var(--spacing-xs);
+}
+
+.import-file-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--color-ink);
+  word-break: break-all;
+}
+
+.import-file-size {
+  font-family: 'Geist Mono', monospace;
+  font-size: 12px;
+  color: var(--color-faint);
+}
+
+/* --- Buttons --- */
+.import-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--spacing-sm);
+  margin-top: var(--spacing-lg);
+}
+
+.import-btn {
+  font-family: 'Geist', sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 8px 16px;
+  border-radius: var(--rounded-sm);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background 0.15s, opacity 0.15s;
+  border: 1px solid transparent;
+}
+
+.import-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.import-btn-primary {
+  background: var(--color-ink);
+  color: var(--color-canvas);
+  border-color: var(--color-ink);
+}
+
+.import-btn-primary:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.import-btn-ghost {
+  background: transparent;
+  color: var(--color-body);
+  border-color: var(--color-hairline);
+}
+
+.import-btn-ghost:hover {
+  background: var(--color-hairline-soft);
+  color: var(--color-ink);
+}
+
+.import-btn-native {
+  background: var(--color-canvas-elevated);
+  color: var(--color-body);
+  border-color: var(--color-hairline);
+}
+
+.import-btn-native:hover {
+  background: var(--color-hairline-soft);
+  color: var(--color-ink);
+}
+
+/* --- Progress --- */
+.import-progress {
+  margin-top: var(--spacing-md);
+  position: relative;
+  height: 24px;
+  background: var(--color-hairline-soft);
+  border-radius: var(--rounded-sm);
+  overflow: hidden;
+}
+
+.import-progress-bar {
+  height: 100%;
+  background: var(--color-primary);
+  border-radius: var(--rounded-sm);
+  transition: width 0.3s ease;
+}
+
+.import-progress-text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Geist Mono', monospace;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-ink);
+}
+
+/* --- Error --- */
+.import-error {
+  margin-top: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: var(--rounded-sm);
+  font-size: 13px;
+  color: #b91c1c;
+}
+
+.theme-dark .import-error {
+  background: #1a0a0a;
+  border-color: #3b1111;
+  color: #fca5a5;
+}
+
+/* --- Success --- */
+.import-success {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: var(--spacing-xl) 0;
+  text-align: center;
+}
+
+.import-success-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: var(--rounded-full);
+  background: #f0fdf4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #16a34a;
+  margin-bottom: var(--spacing-md);
+}
+
+.theme-dark .import-success-icon {
+  background: #0a1a0a;
+  color: #4ade80;
+}
+
+.import-success-text {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-ink);
+  margin: 0 0 4px;
+}
+
+.import-success-detail {
+  font-family: 'Geist Mono', monospace;
+  font-size: 12px;
+  color: var(--color-faint);
+  margin: 0;
+  word-break: break-all;
+}
+
+/* --- Hint --- */
+.import-hint {
+  margin-top: var(--spacing-md);
+  font-size: 11px;
+  color: var(--color-faint);
+  text-align: center;
+  line-height: 1.5;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }

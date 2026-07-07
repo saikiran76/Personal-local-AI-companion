@@ -1,13 +1,13 @@
 # Desktop Companion
 
-A local-first AI desktop assistant built with **Electron**, **FastAPI**, **LangChain**, and **Model Context Protocol (MCP)**. The application runs a local language model (GLM-5.2), streams responses in real time using Server-Sent Events (SSE), and extends the model with MCP-powered tools for interacting with the filesystem, notes, and the web.
+A local-first AI desktop assistant built with **Electron**, **FastAPI**, **LangChain**, **llama.cpp**, and the **Model Context Protocol (MCP)**. The application runs local GGUF language models, streams responses in real time using Server-Sent Events (SSE), and extends the model with MCP-powered tools for interacting with the filesystem, notes, and the web.
 
 ---
 
 # Features
 
 - 🖥️ Cross-platform desktop application powered by Electron
-- 🤖 Local LLM inference with GLM-5.2
+- 🤖 Local GGUF language model inference via `llama.cpp`
 - ⚡ Real-time token streaming using Server-Sent Events (SSE)
 - 🧠 LangChain-based agent orchestration
 - 🔌 Model Context Protocol (MCP) integration
@@ -15,6 +15,8 @@ A local-first AI desktop assistant built with **Electron**, **FastAPI**, **LangC
 - 📝 Notes management
 - 🌐 Browser and web search tools
 - ⚙️ Shared configuration between Electron and Python backend
+- 🚀 Automatic GPU acceleration (CUDA / Metal) with CPU fallback
+- 📦 Multiple GGUF model variants with automatic hardware-aware selection
 
 ---
 
@@ -37,7 +39,7 @@ Electron (Host)
                 │
                 └── AgentOrchestrator
                       ├── ModelLoader
-                      │     └── GLM-5.2 (VRAM / CPU)
+                      │     └── GGUF Model (CPU / CUDA / Metal)
                       │
                       └── MCPClientManager
                             ├── Filesystem MCP Server
@@ -93,23 +95,24 @@ Electron (Host)
 
 The Python backend is responsible for:
 
-- Loading and managing the local language model
+- Loading and managing local GGUF language models
 - Streaming responses using Server-Sent Events (SSE)
 - Orchestrating the AI agent
 - Discovering and invoking MCP tools
+- Selecting the optimal compute strategy based on available hardware
 - Exposing REST endpoints for the Electron application
 
 ## Backend Components
 
 | File | Responsibility |
 |------|----------------|
-| `pyproject.toml` | Project configuration using **uv**. Includes FastAPI, LangChain, MCP, Uvicorn, and `sse-starlette`. |
+| `pyproject.toml` | Project configuration using **uv**. Includes FastAPI, LangChain, MCP, `llama-cpp-python`, Uvicorn, and `sse-starlette`. |
 | `server.py` | FastAPI entry point. Configures CORS, mounts routers, and starts the Uvicorn server. |
 | `app/config.py` | Loads configuration from `~/.desktop-companion/config.json`. |
-| `app/model_loader.py` | Loads GLM-5.2 into VRAM or CPU and streams generated tokens. |
+| `app/model_loader.py` | Loads GGUF models using `llama.cpp`, selects the compute strategy, and streams generated tokens. |
 | `app/agent.py` | LangChain orchestrator that builds prompts, invokes the model, and routes requests to MCP tools. |
 | `app/mcp_client.py` | Starts MCP servers, discovers tools, and routes `call_tool()` requests. |
-| `app/routes.py` | Defines the backend API endpoints. |
+| `app/routes.py` | Defines backend API endpoints. |
 | `mcp_servers/filesystem/` | Filesystem MCP server. |
 | `mcp_servers/notes/` | Notes MCP server. |
 | `mcp_servers/browser/` | Browser MCP server. |
@@ -139,6 +142,85 @@ Its responsibilities include:
 
 ---
 
+# Model System
+
+The project uses a **GGUF-only** inference pipeline powered by **llama.cpp**.
+
+Unlike previous versions, there is no separate Transformers or bitsandbytes loading path. Every supported model is provided as a pre-quantized GGUF file and loaded through a single inference backend.
+
+## Supported Models
+
+| Model | Quantization | Approx. RAM | Best For |
+|------|--------------|------------:|----------|
+| `Qwen2.5-7B-Q8_0` | 8-bit | 7.5 GB | Highest quality |
+| `Qwen2.5-7B-Q5_K_M` | 5-bit | 5.2 GB | Balanced performance |
+| `Qwen2.5-7B-Q4_K_M` | 4-bit | 4.5 GB | Default recommendation |
+| `Llama-3.1-8B-Q5_K_M` | 5-bit | 5.8 GB | Long-context tasks |
+| `Llama-3.1-8B-Q4_K_M` | 4-bit | 5.0 GB | 128K context |
+| `Phi-3.5-Mini-Q4_K_M` | 4-bit | 2.5 GB | Fast inference |
+| `SmolLM2-1.7B-Q4_K_M` | 4-bit | 1.2 GB | Lightweight devices |
+
+### Model Aliases
+
+The loader supports user-friendly aliases that automatically resolve to the appropriate GGUF model.
+
+Examples include:
+
+- `auto`
+- `glm-5.2`
+- `qwen2.5-7b`
+- `llama-3.1-8b`
+- `phi-3.5-mini`
+- `smollm2`
+
+---
+
+# Compute Strategy
+
+The backend automatically selects the best execution mode based on the available hardware.
+
+## NVIDIA CUDA
+
+If CUDA is available:
+
+- Full GPU offloading when sufficient VRAM is available
+- Partial GPU offloading when VRAM is limited
+- Automatic CPU fallback when necessary
+
+```text
+VRAM >= Model Requirement
+    → Full GPU offload
+
+VRAM >= 60% of Requirement
+    → Partial GPU offload
+
+Otherwise
+    → CPU execution
+```
+
+## Apple Silicon
+
+When Metal (MPS) is detected:
+
+```text
+n_gpu_layers = 1
+```
+
+This enables Metal acceleration through `llama.cpp`.
+
+## CPU
+
+If no compatible GPU is available:
+
+```text
+n_gpu_layers = 0
+n_threads = min(cpu_cores, 8)
+```
+
+The thread count is capped to reduce CPU contention while maintaining good inference performance.
+
+---
+
 # Configuration Flow
 
 Electron and the backend share a single configuration file.
@@ -162,7 +244,10 @@ load_config()
         │
         ▼
 ModelLoader
-loads selected model
+resolves model alias
+        │
+        ▼
+Loads GGUF model
         │
         ▼
 Status events
@@ -177,7 +262,7 @@ Example:
 
 ```json
 {
-  "model": "GLM-5.2",
+  "model": "glm-5.2",
   "ai_preference": "local"
 }
 ```
@@ -202,7 +287,13 @@ FastAPI starts
 Load configuration
       │
       ▼
-Load GLM-5.2
+Resolve model alias
+      │
+      ▼
+Select compute strategy
+      │
+      ▼
+Load GGUF model
       │
       ▼
 Stream backend status
@@ -284,20 +375,20 @@ Available tools:
 
 # Running the Project
 
-## 1. Install Backend Dependencies
+## Install Backend Dependencies
 
 ```bash
 cd backend
 uv sync
 ```
 
-## 2. Start the Backend
+## Start the Backend
 
 ```bash
 uv run uvicorn server:app --port 8765
 ```
 
-## 3. Start the Electron Application
+## Start the Electron Application
 
 Open another terminal:
 
@@ -310,8 +401,27 @@ npm run dev
 
 # Development Notes
 
-- Electron automatically starts the backend during application initialization.
+## Current Inference Pipeline
+
+The project now exclusively uses **GGUF models** with **llama.cpp**.
+
+The previous loading pipeline based on Transformers, bitsandbytes, PEFT, and Accelerate has been removed in favor of a single unified inference backend.
+
+## Benefits
+
+- Single model loading path
+- Faster startup
+- Lower memory usage
+- No runtime quantization
+- Simpler dependency management
+- Automatic hardware-aware execution
+- Consistent behavior across CPU, CUDA, and Apple Silicon
+
+## Runtime Characteristics
+
+- Electron automatically starts the backend.
 - The frontend listens to backend status updates through Server-Sent Events.
-- Chat responses are streamed incrementally for a responsive user experience.
-- Model configuration is shared between Electron and the backend through a common configuration file.
-- MCP servers are launched and managed dynamically by the backend, allowing the agent to discover and invoke tools during runtime.
+- Chat responses are streamed token-by-token.
+- Model configuration is shared between Electron and the backend.
+- MCP servers are discovered and managed dynamically by the backend.
+- Hardware acceleration is selected automatically without user configuration.

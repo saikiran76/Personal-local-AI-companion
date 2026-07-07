@@ -15,4 +15,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
     stop: () => ipcRenderer.send('backend:stop'),
     status: () => ipcRenderer.invoke('backend:status'),
   },
+  importModel: () => ipcRenderer.invoke('model:import'),
 });

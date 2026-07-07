@@ -1,7 +1,7 @@
 [project]
 name = "desktop-companion-backend"
 version = "0.1.0"
-description = "AI backend for Desktop Companion — FastAPI + LangChain + MCP"
+description = "AI backend for Desktop Companion - FastAPI + MCP"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
@@ -20,20 +20,8 @@ dependencies = [
 llm = [
     "llama-cpp-python>=0.3.0",
 ]
-quant = [
-    "torch>=2.1.0",
-    "transformers>=4.40.0",
-    "bitsandbytes>=0.43.0",
-    "accelerate>=0.30.0",
-    "peft>=0.10.0",
-]
 full = [
     "llama-cpp-python>=0.3.0",
-    "torch>=2.1.0",
-    "transformers>=4.40.0",
-    "bitsandbytes>=0.43.0",
-    "accelerate>=0.30.0",
-    "peft>=0.10.0",
 ]
 dev = [
     "ruff>=0.6.0",

@@ -76,95 +76,108 @@ async def events(request: Request):
     config = load_config()
 
     async def event_generator():
-        global _model_loader
+        global _model_loader, _agent
 
         yield {
             "event": "connected",
             "data": json.dumps({"message": "Backend connected"}),
         }
 
-        _model_loader = ModelLoader()
+        # Reuse existing ModelLoader if already loaded, otherwise create new one
+        if _model_loader is None or not _model_loader.is_ready:
+            _model_loader = ModelLoader()
 
-        if config.ai_preference == "local":
-            yield {
-                "event": "model_loading",
-                "data": json.dumps({
-                    "model": config.model,
-                    "message": f"Loading {config.model}...",
-                }),
-            }
-
-            model_info = await _model_loader.load(config.model, config.model_path)
-
-            if model_info.status == ModelStatus.READY:
+        # Only attempt model load if not already loaded
+        if not _model_loader.is_ready:
+            if config.ai_preference == "local":
                 yield {
-                    "event": "model_ready",
+                    "event": "model_loading",
                     "data": json.dumps({
-                        "model": model_info.name,
-                        "device": model_info.device,
-                        "device_name": model_info.device_name,
-                        "tier": model_info.tier,
-                        "load_time_ms": round(model_info.load_time_ms),
-                        "model_path": model_info.model_path,
-                        "quantization": model_info.quantization,
-                        "vram_mb": model_info.vram_mb,
-                        "ram_mb": model_info.ram_mb,
-                        "n_gpu_layers": model_info.n_gpu_layers,
-                        "n_threads": model_info.n_threads,
-                        "model_available": not model_info.is_mock,
+                        "model": config.model,
+                        "message": f"Loading {config.model}...",
                     }),
                 }
 
-                # If mock mode, also send model_missing so frontend knows to prompt upload
-                if model_info.is_mock:
-                    yield {
-                        "event": "model_missing",
-                        "data": json.dumps({
-                            "message": "No model file found. Import a .gguf model to enable local AI.",
-                            "model": model_info.name,
-                        }),
-                    }
-            elif model_info.status == ModelStatus.ERROR:
-                # Model failed but fall back to mock mode so backend stays usable
-                logger.warning("Model load failed, falling back to mock mode: %s", model_info.error)
+                model_info = await _model_loader.load(config.model, config.model_path)
+            else:
+                # Non-local mode: go straight to mock
+                model_info = _model_loader.info
                 model_info.status = ModelStatus.READY
                 model_info.is_mock = True
                 model_info.quantization = "mock"
+        else:
+            # Model already loaded from previous connection or import
+            model_info = _model_loader.info
+            logger.info("Reusing existing model: %s", model_info.name)
 
-                yield {
-                    "event": "model_ready",
-                    "data": json.dumps({
-                        "model": model_info.name,
-                        "device": model_info.device,
-                        "device_name": model_info.device_name,
-                        "tier": model_info.tier,
-                        "load_time_ms": 0,
-                        "model_path": None,
-                        "quantization": "mock",
-                        "vram_mb": model_info.vram_mb,
-                        "ram_mb": model_info.ram_mb,
-                        "n_gpu_layers": 0,
-                        "n_threads": model_info.n_threads,
-                        "model_available": False,
-                        "load_error": model_info.error,
-                    }),
-                }
+        if model_info.status == ModelStatus.READY:
+            yield {
+                "event": "model_ready",
+                "data": json.dumps({
+                    "model": model_info.name,
+                    "device": model_info.device,
+                    "device_name": model_info.device_name,
+                    "tier": model_info.tier,
+                    "load_time_ms": round(model_info.load_time_ms),
+                    "model_path": model_info.model_path,
+                    "quantization": model_info.quantization,
+                    "vram_mb": model_info.vram_mb,
+                    "ram_mb": model_info.ram_mb,
+                    "n_gpu_layers": model_info.n_gpu_layers,
+                    "n_threads": model_info.n_threads,
+                    "model_available": not model_info.is_mock,
+                }),
+            }
+
+            if model_info.is_mock:
                 yield {
                     "event": "model_missing",
                     "data": json.dumps({
-                        "message": f"Model could not be loaded: {model_info.error}. Import a .gguf model to enable local AI.",
+                        "message": "No model file found. Import a .gguf model to enable local AI.",
                         "model": model_info.name,
                     }),
                 }
-            else:
-                yield {
-                    "event": "model_error",
-                    "data": json.dumps({"error": f"Unexpected status: {model_info.status}"}),
-                }
+        elif model_info.status == ModelStatus.ERROR:
+            logger.warning("Model load failed, falling back to mock mode: %s", model_info.error)
+            model_info.status = ModelStatus.READY
+            model_info.is_mock = True
+            model_info.quantization = "mock"
 
-        global _agent
-        _agent = AgentOrchestrator(_model_loader, _mcp_manager)
-        await _agent.initialize()
+            yield {
+                "event": "model_ready",
+                "data": json.dumps({
+                    "model": model_info.name,
+                    "device": model_info.device,
+                    "device_name": model_info.device_name,
+                    "tier": model_info.tier,
+                    "load_time_ms": 0,
+                    "model_path": None,
+                    "quantization": "mock",
+                    "vram_mb": model_info.vram_mb,
+                    "ram_mb": model_info.ram_mb,
+                    "n_gpu_layers": 0,
+                    "n_threads": model_info.n_threads,
+                    "model_available": False,
+                    "load_error": model_info.error,
+                }),
+            }
+            yield {
+                "event": "model_missing",
+                "data": json.dumps({
+                    "message": f"Model could not be loaded: {model_info.error}. Import a .gguf model to enable local AI.",
+                    "model": model_info.name,
+                }),
+            }
+        else:
+            yield {
+                "event": "model_error",
+                "data": json.dumps({"error": f"Unexpected status: {model_info.status}"}),
+            }
+
+        # Initialize agent if not already done
+        if _agent is None:
+            _agent = AgentOrchestrator(_model_loader, _mcp_manager)
+            await _agent.initialize()
 
         yield {
             "event": "backend_ready",
@@ -330,6 +343,8 @@ async def import_model(file: UploadFile = File(...)):
         size_mb = dest_path.stat().st_size // (1024 * 1024)
         logger.info("Imported model: %s (%d MB)", file.filename, size_mb)
 
+        # Signal that a re-handshake is needed to load the new model
+        # Do NOT touch ModelLoader here - it would conflict with the SSE stream
         return {
             "success": True,
             "skipped": False,

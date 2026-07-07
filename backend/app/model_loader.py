@@ -167,19 +167,19 @@ GGUF_REGISTRY: dict[str, tuple[str, str, int, int]] = {
     # --- Qwen 2.5 family ---
     "Qwen2.5-7B-Q4_K_M": (
         "Qwen/Qwen2.5-7B-Instruct-GGUF",
-        "qwen2.5-7b-instruct-q4_k_m.gguf",
+        "qwen2.5-7b-instruct-Q4_K_M.gguf",
         32768,
         4500,
     ),
     "Qwen2.5-7B-Q5_K_M": (
         "Qwen/Qwen2.5-7B-Instruct-GGUF",
-        "qwen2.5-7b-instruct-q5_k_m.gguf",
+        "qwen2.5-7b-instruct-Q5_K_M.gguf",
         32768,
         5200,
     ),
     "Qwen2.5-7B-Q8_0": (
         "Qwen/Qwen2.5-7B-Instruct-GGUF",
-        "qwen2.5-7b-instruct-q8_0.gguf",
+        "qwen2.5-7b-instruct-Q8_0.gguf",
         32768,
         7500,
     ),
@@ -466,60 +466,100 @@ class ModelLoader:
         self._model = await loop.run_in_executor(None, _load)
 
     async def _resolve_path(self, model_name: str, model_path: str | None = None) -> Path:
-        """Resolve GGUF file path — download from HuggingFace if not cached."""
+        """Resolve GGUF file path — find local file first, download if needed."""
         if model_path:
             p = Path(model_path)
             if p.exists():
                 return p
             raise FileNotFoundError(f"Model file not found: {model_path}")
 
-        if model_name not in GGUF_REGISTRY:
-            raise ValueError(
-                f"Unknown model: {model_name}. "
-                f"Available: {list(GGUF_REGISTRY.keys())}"
-            )
+        # If model_name looks like a file path, use it directly
+        if model_name.endswith(".gguf"):
+            p = self._model_dir / model_name
+            if p.exists():
+                return p
+            # Also check without directory prefix
+            p = Path(model_name)
+            if p.exists():
+                return p
 
-        repo, filename, _, _ = GGUF_REGISTRY[model_name]
-        cache_path = self._model_dir / filename
+        # Check if there's a matching file in the models directory (case-insensitive)
+        if model_name in GGUF_REGISTRY:
+            _, filename, _, _ = GGUF_REGISTRY[model_name]
+            cache_path = self._model_dir / filename
+            if cache_path.exists():
+                logger.info("Cached: %s", cache_path)
+                return cache_path
 
-        if cache_path.exists():
-            logger.info("Cached: %s", cache_path)
-            return cache_path
+            # Try case-insensitive match in models dir
+            for fpath in self._model_dir.glob("*.gguf"):
+                if fpath.name.lower() == filename.lower():
+                    logger.info("Found (case-insensitive): %s", fpath)
+                    return fpath
 
-        # Download
-        logger.info("Downloading %s from %s...", filename, repo)
-        self._info.status = ModelStatus.DOWNLOADING
-
-        from huggingface_hub import hf_hub_download
-
-        hf_token = os.environ.get("HUGGINGFACE_HUB_TOKEN") or os.environ.get("HF_HUB_TOKEN")
-        loop = asyncio.get_event_loop()
-        downloaded = await loop.run_in_executor(
-            None,
-            lambda: hf_hub_download(
-                repo_id=repo,
-                filename=filename,
-                local_dir=str(self._model_dir),
-                local_dir_use_symlinks=False,
-                token=hf_token,
-            ),
+        # Scan models directory for any .gguf files (imported models)
+        local_models = sorted(
+            self._model_dir.glob("*.gguf"),
+            key=lambda f: f.stat().st_size,
+            reverse=True,  # prefer largest
         )
-        return Path(downloaded)
+        if local_models:
+            logger.info("Using local model: %s", local_models[0])
+            return local_models[0]
+
+        # Last resort: try to download from registry
+        if model_name in GGUF_REGISTRY:
+            repo, filename, _, _ = GGUF_REGISTRY[model_name]
+            logger.info("Downloading %s from %s...", filename, repo)
+            self._info.status = ModelStatus.DOWNLOADING
+
+            from huggingface_hub import hf_hub_download
+
+            hf_token = os.environ.get("HUGGINGFACE_HUB_TOKEN") or os.environ.get("HF_HUB_TOKEN")
+            loop = asyncio.get_event_loop()
+            downloaded = await loop.run_in_executor(
+                None,
+                lambda: hf_hub_download(
+                    repo_id=repo,
+                    filename=filename,
+                    local_dir=str(self._model_dir),
+                    local_dir_use_symlinks=False,
+                    token=hf_token,
+                ),
+            )
+            return Path(downloaded)
+
+        raise FileNotFoundError(
+            f"No model files found. Import a .gguf model first."
+        )
 
     def _resolve_model_name(self, name: str) -> str:
-        """Resolve user input to a GGUF_REGISTRY key."""
-        # Direct match
+        """Resolve user input to a GGUF_REGISTRY key or local file name."""
+        # Direct match in registry
         if name in GGUF_REGISTRY:
             return name
-        # Alias match
+
+        # Check if there are local .gguf files first — always prefer local
+        local_models = sorted(
+            self._model_dir.glob("*.gguf"),
+            key=lambda f: f.stat().st_size,
+            reverse=True,
+        )
+        if local_models:
+            logger.info("Found local model: %s", local_models[0].name)
+            return local_models[0].stem
+
+        # Alias match (only if no local files)
         key = name.lower().strip().replace("_", "-").replace(" ", " ")
         if key in _MODEL_ALIASES:
             return _MODEL_ALIASES[key]
+
         # Partial match
         for alias, target in _MODEL_ALIASES.items():
             if key in alias or alias in key:
                 return target
-        # Unknown — pick by tier
+
+        # Unknown — pick by tier from registry
         logger.warning("Unknown model '%s' — auto-selecting for tier=%s", name, self.compute["tier"])
         return self._pick_by_tier(self.compute["tier"])
 
@@ -552,36 +592,58 @@ class ModelLoader:
         temperature: float,
         stop: list[str] | None,
     ) -> AsyncIterator[str]:
-        """Stream tokens from llama-cpp-python."""
-        def _generate():
-            return self._model.create_chat_completion(
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=max(temperature, 0.01),
-                stop=stop or [],
-                stream=True,
-            )
+        """Stream tokens from llama-cpp-python without blocking the event loop."""
+        import queue
+
+        token_queue: queue.Queue = queue.Queue()
+
+        def _generate_in_thread():
+            """Run in executor thread — yields tokens into a queue."""
+            try:
+                stream = self._model.create_chat_completion(
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=max(temperature, 0.01),
+                    stop=stop or [],
+                    stream=True,
+                )
+                for chunk in stream:
+                    delta = chunk.get("choices", [{}])[0].get("delta", {})
+                    token = delta.get("content", "")
+                    finish_reason = chunk.get("choices", [{}])[0].get("finish_reason")
+
+                    if token:
+                        token_queue.put(("token", token))
+
+                    if finish_reason:
+                        token_queue.put(("done", finish_reason))
+                        break
+
+            except Exception as e:
+                logger.error("Generation error: %s", e)
+                token_queue.put(("error", str(e)))
+
+            finally:
+                token_queue.put(("stop", None))
 
         loop = asyncio.get_event_loop()
+        # Run the generator in a thread so it doesn't block the event loop
+        loop.run_in_executor(None, _generate_in_thread)
 
-        try:
-            stream = await loop.run_in_executor(None, _generate)
+        # Read tokens from the queue (non-blocking to the executor)
+        while True:
+            msg_type, data = await loop.run_in_executor(None, token_queue.get)
 
-            for chunk in stream:
-                delta = chunk.get("choices", [{}])[0].get("delta", {})
-                token = delta.get("content", "")
-                finish_reason = chunk.get("choices", [{}])[0].get("finish_reason")
-
-                if token:
-                    yield token
-
-                if finish_reason:
-                    yield json.dumps({"finish_reason": finish_reason})
-                    break
-
-        except Exception as e:
-            logger.error("Generation error: %s", e)
-            yield json.dumps({"error": str(e)})
+            if msg_type == "token":
+                yield data
+            elif msg_type == "done":
+                yield json.dumps({"finish_reason": data})
+                break
+            elif msg_type == "error":
+                yield json.dumps({"error": data})
+                break
+            elif msg_type == "stop":
+                break
 
     # -------------------------------------------------------------------
     # Mock (no llama-cpp-python)

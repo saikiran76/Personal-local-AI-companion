@@ -15,6 +15,12 @@
   overflow: hidden;
 }
 
+.app-content-nav {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
 /* --- Screen Container --- */
 .screen {
   flex: 1;

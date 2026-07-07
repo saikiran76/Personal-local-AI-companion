@@ -67,7 +67,7 @@ function parseSSE(buffer) {
   return { events, leftover };
 }
 
-export default function ChatScreen({ config, onReset }) {
+export default function ChatScreen({ config, onReset, onBackendStatus, onModelAvailable }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
@@ -106,6 +106,7 @@ export default function ChatScreen({ config, onReset }) {
 
   const connectToBackend = useCallback(() => {
     setBackendStatus(BACKEND.CONNECTING);
+    onBackendStatus?.(BACKEND.CONNECTING);
     setStatusMessage('Connecting to backend...');
 
     const eventSource = new EventSource(`${BACKEND_URL}/events`);
@@ -124,7 +125,9 @@ export default function ChatScreen({ config, onReset }) {
     eventSource.addEventListener('model_ready', (e) => {
       const data = JSON.parse(e.data);
       setModelInfo(data);
-      setModelAvailable(data.model_available !== false);
+      const available = data.model_available !== false;
+      setModelAvailable(available);
+      onModelAvailable?.(available);
       setStatusMessage(data.model_available === false
         ? 'No model file found. Import a .gguf model to enable AI.'
         : `Model loaded on ${data.device}`
@@ -134,7 +137,10 @@ export default function ChatScreen({ config, onReset }) {
     eventSource.addEventListener('backend_ready', (e) => {
       const data = JSON.parse(e.data);
       setBackendStatus(BACKEND.READY);
-      setModelAvailable(data.model_available !== false);
+      onBackendStatus?.(BACKEND.READY);
+      const available = data.model_available !== false;
+      setModelAvailable(available);
+      onModelAvailable?.(available);
       setStatusMessage('');
       console.log('Backend ready, tools:', data.tools, 'model_available:', data.model_available);
     });
@@ -142,6 +148,7 @@ export default function ChatScreen({ config, onReset }) {
     eventSource.addEventListener('model_error', (e) => {
       const data = JSON.parse(e.data);
       setModelAvailable(false);
+      onModelAvailable?.(false);
       setStatusMessage(`Model error: ${data.error}`);
       // Don't set ERROR status — backend will still send backend_ready
       // This keeps the app usable even when model fails
@@ -157,6 +164,7 @@ export default function ChatScreen({ config, onReset }) {
 
     eventSource.onerror = () => {
       setBackendStatus(BACKEND.DISCONNECTED);
+      onBackendStatus?.(BACKEND.DISCONNECTED);
       setStatusMessage('Backend not available. Using local mode.');
       eventSource.close();
     };
@@ -652,9 +660,20 @@ export default function ChatScreen({ config, onReset }) {
       {showImportModal && (
         <ImportModelModal
           onClose={() => setShowImportModal(false)}
-          onImported={(models) => {
-            console.log('Models imported:', models);
+          onImported={(models, modelLoaded) => {
+            console.log('Models imported:', models, 'model_loaded:', modelLoaded);
             setShowImportModal(false);
+
+            // Reset messages and re-handshake with backend
+            setMessages([]);
+            setModelInfo(null);
+            setModelAvailable(false);
+            setBackendStatus(BACKEND.CONNECTING);
+            setStatusMessage('Model imported. Reloading...');
+
+            // Close existing SSE and reconnect to trigger fresh model load
+            eventSourceRef.current?.close();
+            setTimeout(() => connectToBackend(), 500);
           }}
         />
       )}

@@ -2,7 +2,6 @@
 
 import json
 import logging
-import re
 from typing import AsyncIterator
 from dataclasses import dataclass, field
 
@@ -18,12 +17,6 @@ Be concise, helpful, and proactive. Use tools when they would help accomplish th
 
 # Max ReAct iterations to prevent infinite loops
 MAX_TOOL_ROUNDS = 5
-
-# Pattern to detect tool calls in LLM output
-TOOL_CALL_PATTERN = re.compile(
-    r'\{"tool"\s*:\s*"([^"]+)"\s*,\s*"arguments"\s*:\s*(\{[^}]*\})\s*\}',
-    re.DOTALL,
-)
 
 
 @dataclass
@@ -43,13 +36,17 @@ class AgentOrchestrator:
 
     Flow:
     1. Build messages with system prompt + tool descriptions
-    2. Send to LLM, stream response tokens
-    3. After LLM finishes, check if response contains a tool call
-    4. If tool call found → execute via MCP → append result → go to step 2
-    5. If no tool call → stream final response to client
-
-    The agent intercepts tool calls before they reach the user,
-    executes them transparently, and feeds results back to the LLM.
+    2. Send to LLM, buffer full response
+    3. Check if response contains a tool call
+    4. If tool call found:
+       a. Yield tool_call event (no raw JSON to client)
+       b. Execute via MCP
+       c. Yield tool_result event
+       d. Append both to history
+       e. Loop back to step 1
+    5. If no tool call:
+       a. Stream final response tokens to client
+       b. Yield done event
     """
 
     def __init__(self, model_loader: ModelLoader, mcp_manager: MCPClientManager):
@@ -66,13 +63,6 @@ class AgentOrchestrator:
     async def chat(self, user_message: str) -> AsyncIterator[AgentEvent]:
         """
         Process a chat message through the ReAct loop.
-
-        Streams AgentEvent objects:
-        - type="token": streaming text token from LLM
-        - type="thinking": agent is deciding (internal)
-        - type="tool_call": agent is calling a tool
-        - type="tool_result": tool returned a result
-        - type="done": response complete
         """
         self.conversation_history.append({"role": "user", "content": user_message})
 
@@ -80,19 +70,15 @@ class AgentOrchestrator:
         for round_num in range(MAX_TOOL_ROUNDS):
             logger.info("ReAct round %d", round_num + 1)
 
-            # Build messages for LLM
             messages = self._build_messages()
 
-            # Collect full LLM response
+            # Buffer the full LLM response (don't stream yet — we need to check for tool calls)
             full_response = ""
-
-            # Stream tokens from LLM
             async for token in self.model.generate(messages=messages, max_tokens=1024):
-                # Check if this is a finish_reason signal
+                # Skip finish_reason JSON tokens
                 if token.startswith("{") and "finish_reason" in token:
-                    break
+                    continue
                 full_response += token
-                yield AgentEvent(type="token", content=token)
 
             logger.info("LLM response (round %d): %s", round_num + 1, full_response[:200])
 
@@ -100,13 +86,18 @@ class AgentOrchestrator:
             tool_call = self._extract_tool_call(full_response)
 
             if tool_call is None:
-                # No tool call — this is the final response
+                # No tool call — stream the final response to client
+                # Yield the response in chunks for smooth streaming
+                chunk_size = 12
+                for i in range(0, len(full_response), chunk_size):
+                    yield AgentEvent(type="token", content=full_response[i:i + chunk_size])
+
                 self.conversation_history.append({"role": "assistant", "content": full_response})
                 self._trim_history()
                 yield AgentEvent(type="done", content="", done=True)
                 return
 
-            # Tool call found — execute it
+            # Tool call found — execute it (don't send raw JSON to client)
             tool_name = tool_call["tool"]
             tool_args = tool_call["arguments"]
 
@@ -131,7 +122,7 @@ class AgentOrchestrator:
                 tool_result=tool_result,
             )
 
-            # Add the assistant's tool-calling message and tool result to history
+            # Add to conversation history
             self.conversation_history.append({"role": "assistant", "content": full_response})
             self.conversation_history.append({
                 "role": "tool",
@@ -140,9 +131,7 @@ class AgentOrchestrator:
 
             self._trim_history()
 
-            # Loop continues — LLM will see the tool result and generate next response
-
-        # If we exhaust all rounds, add a final message
+        # Exhausted all rounds
         self.conversation_history.append({
             "role": "assistant",
             "content": "I've completed the tool operations. Let me know if you need anything else.",
@@ -170,28 +159,55 @@ class AgentOrchestrator:
         Looks for patterns like:
           {"tool": "read_file", "arguments": {"path": "/tmp/test.txt"}}
 
+        Uses bracket-counting to handle nested JSON in arguments.
         Returns None if no tool call is found.
         """
-        # Find the last JSON object in the response that has a "tool" key
-        matches = TOOL_CALL_PATTERN.findall(text)
-        if not matches:
+        # Find the "tool" key
+        idx = text.find('"tool"')
+        if idx == -1:
             return None
 
-        # Take the last match (in case there are multiple)
-        tool_name, args_str = matches[-1]
-
-        try:
-            arguments = json.loads(args_str)
-        except json.JSONDecodeError:
-            logger.warning("Failed to parse tool arguments: %s", args_str)
+        # Find the opening brace before "tool"
+        brace_start = text.rfind('{', 0, idx)
+        if brace_start == -1:
             return None
 
-        return {"tool": tool_name, "arguments": arguments}
+        # Count braces to find the matching closing brace
+        depth = 0
+        in_string = False
+        escape = False
+        for i in range(brace_start, len(text)):
+            c = text[i]
+            if escape:
+                escape = False
+                continue
+            if c == '\\' and in_string:
+                escape = True
+                continue
+            if c == '"' and not escape:
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    json_str = text[brace_start:i + 1]
+                    try:
+                        obj = json.loads(json_str)
+                        if "tool" in obj and "arguments" in obj:
+                            return {"tool": obj["tool"], "arguments": obj["arguments"]}
+                    except json.JSONDecodeError:
+                        return None
+                    break
+
+        return None
 
     def _trim_history(self):
         """Keep conversation history manageable."""
         if len(self.conversation_history) > 30:
-            # Keep the last 20 messages
             self.conversation_history = self.conversation_history[-20:]
 
     def reset(self):

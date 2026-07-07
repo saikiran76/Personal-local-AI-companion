@@ -3,6 +3,14 @@ import TitleBar from './screens/TitleBar';
 import WelcomeScreen from './screens/WelcomeScreen';
 import SetupScreen from './screens/SetupScreen';
 import ChatScreen from './screens/ChatScreen';
+import LocalAIScreen from './screens/LocalAIScreen';
+import MemoryScreen from './screens/MemoryScreen';
+import TasksScreen from './screens/TasksScreen';
+import IntegrationsScreen from './screens/IntegrationsScreen';
+import AutomationsScreen from './screens/AutomationsScreen';
+import PrivacyScreen from './screens/PrivacyScreen';
+import SettingsScreen from './screens/SettingsScreen';
+import SidebarNavigation from './components/SidebarNavigation';
 import { config } from './store';
 
 const PHASES = {
@@ -12,10 +20,21 @@ const PHASES = {
   MAIN: 'main',
 };
 
+const BACKEND = {
+  DISCONNECTED: 'disconnected',
+  CONNECTING: 'connecting',
+  MODEL_LOADING: 'model_loading',
+  READY: 'ready',
+  ERROR: 'error',
+};
+
 export default function App() {
   const [phase, setPhase] = useState(PHASES.LOADING);
   const [welcomeData, setWelcomeData] = useState(null);
   const [configData, setConfigData] = useState(null);
+  const [activeScreen, setActiveScreen] = useState('chat');
+  const [backendStatus, setBackendStatus] = useState(BACKEND.DISCONNECTED);
+  const [modelAvailable, setModelAvailable] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -26,7 +45,6 @@ export default function App() {
         const all = await config.getAll();
         setConfigData(all);
         setPhase(PHASES.MAIN);
-        // Start Python backend on app launch if already set up
         window.electronAPI?.backend?.start();
       } else if (onboardingDone) {
         setPhase(PHASES.SETUP);
@@ -57,9 +75,11 @@ export default function App() {
     setConfigData(all);
     setPhase(PHASES.MAIN);
 
-    // Start Python backend
     window.electronAPI?.backend?.start();
   };
+
+  const handleBackendStatus = (status) => setBackendStatus(status);
+  const handleModelAvailable = (available) => setModelAvailable(available);
 
   if (phase === PHASES.LOADING) {
     return (
@@ -98,19 +118,70 @@ export default function App() {
     );
   }
 
-  // Main app — Chat Experience
+  const userName = configData?.userName || 'User';
+  const assistantName = configData?.assistantName || 'Companion';
+
+  const renderScreen = () => {
+    switch (activeScreen) {
+      case 'chat':
+        return (
+          <ChatScreen
+            config={configData}
+            onReset={async () => {
+              await config.reset();
+              setConfigData(null);
+              setPhase(PHASES.WELCOME);
+            }}
+            onBackendStatus={handleBackendStatus}
+            onModelAvailable={handleModelAvailable}
+          />
+        );
+      case 'ai':
+        return <LocalAIScreen config={configData} />;
+      case 'memory':
+        return <MemoryScreen config={configData} />;
+      case 'tasks':
+        return <TasksScreen config={configData} />;
+      case 'integrations':
+        return <IntegrationsScreen config={configData} />;
+      case 'automations':
+        return <AutomationsScreen config={configData} />;
+      case 'privacy':
+        return <PrivacyScreen config={configData} />;
+      case 'settings':
+        return (
+          <SettingsScreen
+            config={configData}
+            onReset={async () => {
+              await config.reset();
+              setConfigData(null);
+              setPhase(PHASES.WELCOME);
+            }}
+          />
+        );
+      default:
+        return <ChatScreen config={configData} onReset={() => {}} />;
+    }
+  };
+
   return (
     <div className={`app-shell ${configData?.theme === 'dark' ? 'theme-dark' : ''}`}>
       <TitleBar />
-      <div className="app-content">
-        <ChatScreen
-          config={configData}
+      <div className="app-content app-content-nav">
+        <SidebarNavigation
+          activeScreen={activeScreen}
+          onNavigate={setActiveScreen}
+          userName={userName}
+          assistantName={assistantName}
           onReset={async () => {
             await config.reset();
             setConfigData(null);
             setPhase(PHASES.WELCOME);
           }}
+          backendStatus={backendStatus}
+          modelAvailable={modelAvailable}
         />
+        {renderScreen()}
       </div>
     </div>
   );

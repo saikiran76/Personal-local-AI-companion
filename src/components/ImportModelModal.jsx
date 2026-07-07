@@ -30,7 +30,13 @@ export default function ImportModelModal({ onClose, onImported }) {
       setError('Please select a .gguf model file');
       return;
     }
-    setSelectedFile(file);
+    setSelectedFile({
+      name: file.name,
+      size: file.size,
+      source: 'file',
+      file,
+      path: null,
+    });
   }, []);
 
   const handleDragOver = useCallback((e) => {
@@ -61,36 +67,75 @@ export default function ImportModelModal({ onClose, onImported }) {
     if (file) handleFile(file);
   }, [handleFile]);
 
+  const handleSelectFile = useCallback(async () => {
+    setError('');
+
+    if (window.electronAPI?.importModel) {
+      try {
+        const result = await window.electronAPI.importModel();
+        if (result.canceled) return;
+
+        if (result.success && result.selected?.length > 0) {
+          const selected = result.selected[0];
+          setSelectedFile({
+            name: selected.fileName,
+            size: selected.sizeBytes || 0,
+            source: 'native',
+            path: selected.filePath,
+            file: null,
+          });
+          return;
+        }
+
+        if (result.success) {
+          setError('No model file was selected');
+          return;
+        }
+
+        setError(result.error || 'Unable to select a model file');
+      } catch (err) {
+        console.error('Native file selection failed:', err);
+        setError(err.message || 'Unable to open file picker');
+      }
+      return;
+    }
+
+    fileInputRef.current?.click();
+  }, []);
+
   const handleImport = async () => {
-    if (!selectedFile || importing) return;
+    if (importing) return;
+
+    if (!selectedFile) {
+      await handleSelectFile();
+      return;
+    }
 
     setImporting(true);
     setError('');
     setProgress(0);
 
-    // Try Electron native dialog path first (if available)
-    if (window.electronAPI?.importModel) {
-      try {
-        const result = await window.electronAPI.importModel();
-        if (result.canceled) {
-          setImporting(false);
-          return;
-        }
+    try {
+      if (selectedFile.source === 'native' && selectedFile.path && window.electronAPI?.importModel) {
+        const result = await window.electronAPI.importModel(selectedFile.path);
         if (result.success && result.imported?.length > 0) {
           setImported(true);
           setProgress(100);
-          onImported?.(result.imported);
+          onImported?.(result.imported, false);
           return;
         }
-      } catch (err) {
-        console.error('Electron import failed, falling back to HTTP:', err);
+        if (result.canceled) {
+          return;
+        }
+        throw new Error(result.error || 'Import failed');
       }
-    }
 
-    // Fallback: upload via HTTP to backend
-    try {
+      if (!selectedFile.file) {
+        throw new Error('No file payload available for upload');
+      }
+
       const formData = new FormData();
-      formData.append('file', selectedFile);
+      formData.append('file', selectedFile.file);
 
       const xhr = new XMLHttpRequest();
       xhr.open('POST', `${BACKEND_URL}/models/import`);
@@ -116,7 +161,7 @@ export default function ImportModelModal({ onClose, onImported }) {
       if (response.success) {
         setImported(true);
         setProgress(100);
-        onImported?.([response.model]);
+        onImported?.([response.model], response.model_loaded);
       } else {
         setError(response.error || 'Import failed');
       }
@@ -124,30 +169,6 @@ export default function ImportModelModal({ onClose, onImported }) {
       setError(err.message || 'Import failed. Is the backend running?');
     } finally {
       setImporting(false);
-    }
-  };
-
-  const handleOpenNative = async () => {
-    if (window.electronAPI?.importModel) {
-      try {
-        setImporting(true);
-        const result = await window.electronAPI.importModel();
-        if (result.canceled) {
-          setImporting(false);
-          return;
-        }
-        if (result.success && result.imported?.length > 0) {
-          setImported(true);
-          setProgress(100);
-          onImported?.(result.imported);
-        }
-      } catch (err) {
-        setError(err.message);
-      } finally {
-        setImporting(false);
-      }
-    } else {
-      fileInputRef.current?.click();
     }
   };
 
@@ -246,7 +267,7 @@ export default function ImportModelModal({ onClose, onImported }) {
                 </button>
                 <button
                   className="import-btn import-btn-native"
-                  onClick={handleOpenNative}
+                  onClick={handleSelectFile}
                 >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>

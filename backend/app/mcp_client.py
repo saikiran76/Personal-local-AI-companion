@@ -44,6 +44,11 @@ def _get_default_server_configs() -> list[MCPServerConfig]:
             command=python,
             args=["-m", "mcp_servers.browser.server"],
         ),
+        MCPServerConfig(
+            name="email",
+            command=python,
+            args=["-m", "mcp_servers.email.server"],
+        ),
     ]
 
 
@@ -235,6 +240,11 @@ class MCPClientManager:
     def get_tool_schemas(self) -> list[dict]:
         """Return all discovered tool schemas for the LLM system prompt."""
         return [info["schema"] for info in self._tools.values()]
+
+    def get_tool_schema(self, tool_name: str) -> dict | None:
+        """Return the schema for a specific tool, or None if not found."""
+        info = self._tools.get(tool_name)
+        return info["schema"] if info else None
 
     def get_tool_definitions_for_llm(self) -> str:
         """Format tool schemas as text for the LLM system prompt."""

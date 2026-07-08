@@ -636,6 +636,24 @@
   color: #0a0a0a;
 }
 
+.theme-dark .tool-call.running {
+  background: #172554;
+  border-color: #1e40af;
+  color: #93c5fd;
+}
+
+.theme-dark .tool-call.done {
+  background: #052e16;
+  border-color: #166534;
+  color: #86efac;
+}
+
+.theme-dark .tool-status-bar {
+  background: #172554;
+  border-color: #1e40af;
+  color: #93c5fd;
+}
+
 /* --- Tool Calls --- */
 .tool-calls {
   display: flex;
@@ -648,48 +666,73 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  background: var(--color-hairline-soft);
-  border: 1px solid var(--color-hairline);
-  border-radius: var(--rounded-sm);
-  padding: 6px 10px;
+  border-radius: 20px;
+  padding: 6px 14px;
   font-size: 12px;
   line-height: 1;
   width: fit-content;
-  transition: border-color 0.2s;
+  font-weight: 500;
+  transition: all 0.2s ease;
 }
 
 .tool-call.running {
-  border-color: var(--color-link);
-  background: var(--color-link-soft);
+  background: #eff6ff;
+  border: 1px solid #93c5fd;
+  color: #1d4ed8;
+  animation: toolPulse 1.5s ease-in-out infinite;
 }
 
 .tool-call.done {
-  border-color: var(--color-hairline);
-  background: var(--color-hairline-soft);
+  background: #f0fdf4;
+  border: 1px solid #86efac;
+  color: #15803d;
 }
 
 .tool-call-icon {
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .tool-call-name {
   font-family: 'Geist Mono', monospace;
-  font-weight: 500;
-  color: var(--color-ink);
+  font-weight: 600;
   font-size: 12px;
+  letter-spacing: -0.02em;
+}
+
+@keyframes toolPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+.tool-call + .tool-call {
+  margin-top: 4px;
 }
 
 .tool-status-bar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
+  gap: 10px;
+  padding: 10px 16px;
   margin-bottom: var(--spacing-sm);
-  font-size: 12px;
-  color: var(--color-body);
-  background: var(--color-hairline-soft);
-  border-radius: var(--rounded-sm);
+  font-size: 13px;
+  font-weight: 500;
+  color: #1d4ed8;
+  background: #eff6ff;
+  border: 1px solid #93c5fd;
+  border-radius: 20px;
   width: fit-content;
+  animation: toolPulse 1.5s ease-in-out infinite;
+}
+
+.tool-status-name {
+  font-family: 'Geist Mono', monospace;
+  font-weight: 600;
+}
+
+.tool-status-dots {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: 4px;
 }
 
 /* --- Sidebar Import Model Button --- */
@@ -1021,4 +1064,246 @@
 @keyframes slideUp {
   from { opacity: 0; transform: translateY(8px) scale(0.98); }
   to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* --- Clarify Prompt --- */
+.clarify-prompt {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-lg);
+  margin: var(--spacing-xs) 0;
+  background: var(--color-surface);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--rounded-md);
+  animation: fadeIn 0.2s ease;
+}
+
+.clarify-icon {
+  font-size: 18px;
+  line-height: 1;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.clarify-actions {
+  display: flex;
+  gap: var(--spacing-xs);
+  flex: 1;
+}
+
+.clarify-input {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--rounded-sm);
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.clarify-input:focus {
+  border-color: var(--color-primary);
+}
+
+.clarify-send-btn {
+  padding: 6px 14px;
+  border: none;
+  border-radius: var(--rounded-sm);
+  background: var(--color-primary);
+  color: var(--color-on-primary);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s;
+  white-space: nowrap;
+}
+
+.clarify-send-btn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.clarify-send-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* --- Confirm Prompt --- */
+.confirm-prompt {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-lg);
+  margin: var(--spacing-xs) 0;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: var(--rounded-md);
+  animation: fadeIn 0.2s ease;
+}
+
+.theme-dark .confirm-prompt {
+  background: #1a1600;
+  border-color: #422006;
+}
+
+.confirm-icon {
+  font-size: 18px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.confirm-actions {
+  display: flex;
+  gap: var(--spacing-xs);
+}
+
+.confirm-btn {
+  padding: 6px 14px;
+  border: none;
+  border-radius: var(--rounded-sm);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.confirm-yes {
+  background: #16a34a;
+  color: white;
+}
+
+.confirm-yes:hover {
+  opacity: 0.9;
+}
+
+.confirm-no {
+  background: var(--color-surface);
+  color: var(--color-ink);
+  border: 1px solid var(--color-hairline);
+}
+
+.confirm-no:hover {
+  background: var(--color-canvas);
+}
+
+/* --- Compose Form (email intent) --- */
+.compose-form {
+  padding: var(--spacing-md) var(--spacing-lg);
+  margin: var(--spacing-xs) 0;
+  background: var(--color-surface);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--rounded-md);
+  animation: fadeIn 0.2s ease;
+  max-width: 480px;
+}
+
+.compose-header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-sm);
+}
+
+.compose-icon {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.compose-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-ink);
+}
+
+.compose-fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.compose-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.compose-field label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.compose-field input,
+.compose-field textarea {
+  padding: 8px 10px;
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--rounded-sm);
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: inherit;
+  font-size: 13px;
+  resize: vertical;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.compose-field input:focus,
+.compose-field textarea:focus {
+  border-color: var(--color-primary);
+}
+
+.compose-actions {
+  display: flex;
+  gap: var(--spacing-xs);
+  margin-top: var(--spacing-sm);
+}
+
+.compose-btn {
+  padding: 8px 16px;
+  border: none;
+  border-radius: var(--rounded-sm);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.compose-save {
+  background: var(--color-primary);
+  color: var(--color-on-primary);
+}
+
+.compose-save:hover {
+  opacity: 0.9;
+}
+
+.compose-send {
+  background: var(--color-surface);
+  color: var(--color-ink);
+  border: 1px solid var(--color-hairline);
+}
+
+.compose-send:hover {
+  background: var(--color-canvas);
+}
+
+.compose-draft-note {
+  margin-top: var(--spacing-sm);
+  font-size: 11px;
+  color: var(--color-faint);
+}
+
+.compose-draft-note code {
+  background: var(--color-canvas);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 11px;
 }

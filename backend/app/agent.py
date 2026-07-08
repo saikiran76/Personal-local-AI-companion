@@ -14,7 +14,8 @@ logger = logging.getLogger(__name__)
 SYSTEM_PROMPT = """You are a helpful desktop AI assistant running locally on the user's device.
 You have access to tools for file system operations, note management, and browser automation.
 Always prioritize user privacy — all processing happens locally.
-Be concise, helpful, and proactive. Use tools when they would help accomplish the task."""
+Be concise, helpful, and proactive. Use tools when they would help accomplish the task.
+Attempt a tool call even with partial information — the system will ask the user for anything missing."""
 
 MAX_TOOL_ROUNDS = 5
 
@@ -31,11 +32,13 @@ _ECHO_PATTERNS = [
 
 _MIN_RESPONSE_LENGTH = 10
 
+_CONFIRMATION_TOOLS = {"delete_file", "move_file", "execute_organize"}
+
 
 @dataclass
 class AgentEvent:
     """Events streamed from the agent to the client."""
-    type: str  # token | clear | tool_call | tool_result | thinking | error | done
+    type: str  # token | clear | tool_call | tool_result | thinking | error | done | clarify | confirm | compose_form
     content: str = ""
     tool_name: str = ""
     tool_args: dict = field(default_factory=dict)
@@ -45,15 +48,15 @@ class AgentEvent:
 
 class AgentOrchestrator:
     """
-    ReAct agent with buffered streaming.
+    ReAct agent with buffered streaming and interactive clarification.
 
-    Each LLM round buffers all tokens internally, then after generation
-    completes, checks whether the response is a tool call or text.
-    - Tool call: emits tool_call → tool_result, then loops for next round.
-    - Text: streams buffered tokens to the client, then emits done.
+    Supports three response paths:
+    - Tool call with complete args → execute immediately (or confirm if risky)
+    - Tool call with missing args → ask user for each missing field one at a time
+    - Text response → stream to client
 
-    This avoids React batching issues where 'clear' events fail to wipe
-    previously streamed tokens in the same render cycle.
+    Pending state tracks whether we're waiting for a clarification answer
+    or a confirmation decision, so the next user reply routes correctly.
     """
 
     def __init__(self, model_loader: ModelLoader, mcp_manager: MCPClientManager):
@@ -61,13 +64,50 @@ class AgentOrchestrator:
         self.mcp = mcp_manager
         self.conversation_history: list[dict] = []
         self._tool_call_count = 0
+        self._pending_state: dict | None = None
+        self._organize_plans: dict[str, dict] = {}  # plan_id → {moves, path, summary}
 
     async def initialize(self):
         await self.mcp.connect_all()
         tools = self.mcp.get_tool_schemas()
         logger.info("Agent initialized with %d tools: %s", len(tools), [t["name"] for t in tools])
 
-    async def chat(self, user_message: str) -> AsyncIterator[AgentEvent]:
+    async def chat(self, user_message: str, user_response: str | None = None) -> AsyncIterator[AgentEvent]:
+        # --- Resume from pending state ---
+        if self._pending_state and user_response is not None:
+            pending = self._pending_state
+            self._pending_state = None
+
+            if pending["type"] == "clarify":
+                async for event in self._handle_clarify_resume(pending, user_message, user_response):
+                    yield event
+                return
+
+            elif pending["type"] == "confirm":
+                async for event in self._handle_confirm_resume(pending, user_response):
+                    yield event
+                return
+
+        # --- Escape hatch: if user typed something unrelated to pending, clear it ---
+        if self._pending_state and user_response is None:
+            logger.info("Clearing stale pending state — user sent unrelated message")
+            self._pending_state = None
+            self._organize_plans.clear()
+
+        # --- Compose intent bypass: short-circuit LLM for email drafting ---
+        compose_slots = self._is_compose_intent(user_message)
+        if compose_slots is not None:
+            logger.info("Compose intent detected: %s", compose_slots)
+            self.conversation_history.append({"role": "user", "content": user_message})
+            yield AgentEvent(
+                type="compose_form",
+                content=json.dumps(compose_slots),
+                tool_name="draft_email",
+                tool_args=compose_slots,
+            )
+            return
+
+        # --- Normal flow ---
         self.conversation_history.append({"role": "user", "content": user_message})
 
         model_name = self.model.info.name
@@ -84,12 +124,10 @@ class AgentOrchestrator:
 
             messages = self._build_messages()
 
-            # --- Buffered generation: stream tokens only after confirming no tool call ---
-            # This avoids React batching issues where 'clear' wipes streamed tokens
             yield AgentEvent(type="thinking", content="Processing...")
 
             full_response = ""
-            token_buffer = []  # buffered tokens, not yet sent to client
+            token_buffer = []
 
             async for token in self.model.generate(messages=messages, max_tokens=512):
                 if token.startswith("{") and "finish_reason" in token:
@@ -99,16 +137,53 @@ class AgentOrchestrator:
 
             logger.info("LLM response (round %d): %s", round_num + 1, full_response[:200])
 
-            # --- Check for tool call BEFORE streaming anything ---
+            # --- Check for tool call ---
             tool_call = None
             if '"tool"' in full_response and '{' in full_response:
                 tool_call = self._extract_tool_call(full_response)
 
             if tool_call is not None and not self._is_prompt_echo(full_response):
-                # Tool call — stream nothing, show structured tool call
                 tool_name = tool_call["tool"]
                 tool_args = tool_call["arguments"]
 
+                # --- Validate arguments ---
+                missing = self._validate_tool_args(tool_name, tool_args)
+                if missing:
+                    # Ask for first missing field one at a time
+                    field_name = missing[0]
+                    remaining = missing[1:]
+                    self._pending_state = {
+                        "type": "clarify",
+                        "tool_name": tool_name,
+                        "tool_args": tool_args,
+                        "missing_field": field_name,
+                        "remaining_fields": remaining,
+                    }
+                    yield AgentEvent(
+                        type="clarify",
+                        content=f"I need the **{field_name}** to use `{tool_name}`. What should I use?",
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                    )
+                    return
+
+                # --- Confirmation for risky tools ---
+                if tool_name in _CONFIRMATION_TOOLS:
+                    summary = self._format_confirm_summary(tool_name, tool_args)
+                    self._pending_state = {
+                        "type": "confirm",
+                        "tool_name": tool_name,
+                        "tool_args": tool_args,
+                    }
+                    yield AgentEvent(
+                        type="confirm",
+                        content=summary,
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                    )
+                    return
+
+                # --- Execute tool ---
                 yield AgentEvent(
                     type="tool_call",
                     content=f"Using {tool_name}...",
@@ -137,10 +212,10 @@ class AgentOrchestrator:
                     "content": f"Tool '{tool_name}' result:\n{tool_result}",
                 })
                 self._trim_history()
-                continue  # Next ReAct round — LLM will see tool result
+                continue
 
             else:
-                # Normal text response — stream buffered tokens
+                # Normal text response
                 if self._is_valid_response(full_response):
                     for buffered_token in token_buffer:
                         yield AgentEvent(type="token", content=buffered_token)
@@ -158,6 +233,198 @@ class AgentOrchestrator:
 
         yield AgentEvent(type="done", content="", done=True)
 
+    # --- Resume handlers ---
+
+    async def _handle_clarify_resume(
+        self, pending: dict, user_message: str, user_response: str
+    ) -> AsyncIterator[AgentEvent]:
+        """Handle user's answer to a clarification question."""
+        tool_name = pending["tool_name"]
+        tool_args = dict(pending["tool_args"])
+        field_name = pending["missing_field"]
+        remaining = list(pending.get("remaining_fields", []))
+
+        # Fill the answered field
+        tool_args[field_name] = user_response.strip()
+
+        # Add exchange to history so LLM sees the clarification
+        self.conversation_history.append({"role": "user", "content": user_message})
+
+        # Check if more fields are missing
+        still_missing = self._validate_tool_args(tool_name, tool_args)
+        if still_missing:
+            next_field = still_missing[0]
+            remaining = still_missing[1:]
+            self._pending_state = {
+                "type": "clarify",
+                "tool_name": tool_name,
+                "tool_args": tool_args,
+                "missing_field": next_field,
+                "remaining_fields": remaining,
+            }
+            yield AgentEvent(
+                type="clarify",
+                content=f"I also need the **{next_field}**. What should I use?",
+                tool_name=tool_name,
+                tool_args=tool_args,
+            )
+            return
+
+        # All args present — check if confirmation needed
+        if tool_name in _CONFIRMATION_TOOLS:
+            summary = self._format_confirm_summary(tool_name, tool_args)
+            self._pending_state = {
+                "type": "confirm",
+                "tool_name": tool_name,
+                "tool_args": tool_args,
+            }
+            yield AgentEvent(
+                type="confirm",
+                content=summary,
+                tool_name=tool_name,
+                tool_args=tool_args,
+            )
+            return
+
+        # Execute
+        yield AgentEvent(
+            type="tool_call",
+            content=f"Using {tool_name}...",
+            tool_name=tool_name,
+            tool_args=tool_args,
+        )
+
+        try:
+            tool_result = await self.mcp.call_tool(tool_name, tool_args)
+        except Exception as e:
+            tool_result = json.dumps({"error": str(e)})
+            logger.error("Tool execution failed: %s", e)
+
+        self._tool_call_count += 1
+
+        yield AgentEvent(
+            type="tool_result",
+            content=tool_result,
+            tool_name=tool_name,
+            tool_result=tool_result,
+        )
+
+        self.conversation_history.append({
+            "role": "tool",
+            "content": f"Tool '{tool_name}' result:\n{tool_result}",
+        })
+        self._trim_history()
+
+        # Let LLM generate a final response based on tool result
+        async for event in self._final_response_round():
+            yield event
+
+    async def _handle_confirm_resume(
+        self, pending: dict, user_response: str
+    ) -> AsyncIterator[AgentEvent]:
+        """Handle user's yes/no confirmation."""
+        tool_name = pending["tool_name"]
+        tool_args = pending["tool_args"]
+
+        answer = user_response.strip().lower()
+        if answer not in ("yes", "y", "confirm", "ok", "sure", "do it", "go"):
+            yield AgentEvent(
+                type="token",
+                content="Okay, cancelled.",
+            )
+            yield AgentEvent(type="done", content="", done=True)
+            return
+
+        # Execute
+        yield AgentEvent(
+            type="tool_call",
+            content=f"Using {tool_name}...",
+            tool_name=tool_name,
+            tool_args=tool_args,
+        )
+
+        try:
+            tool_result = await self.mcp.call_tool(tool_name, tool_args)
+        except Exception as e:
+            tool_result = json.dumps({"error": str(e)})
+            logger.error("Tool execution failed: %s", e)
+
+        self._tool_call_count += 1
+
+        yield AgentEvent(
+            type="tool_result",
+            content=tool_result,
+            tool_name=tool_name,
+            tool_result=tool_result,
+        )
+
+        self.conversation_history.append({
+            "role": "tool",
+            "content": f"Tool '{tool_name}' result:\n{tool_result}",
+        })
+        self._trim_history()
+
+        async for event in self._final_response_round():
+            yield event
+
+    async def _final_response_round(self) -> AsyncIterator[AgentEvent]:
+        """One more LLM round to generate a natural language response after tool execution."""
+        messages = self._build_messages()
+
+        yield AgentEvent(type="thinking", content="Processing...")
+
+        full_response = ""
+        token_buffer = []
+
+        async for token in self.model.generate(messages=messages, max_tokens=512):
+            if token.startswith("{") and "finish_reason" in token:
+                continue
+            full_response += token
+            token_buffer.append(token)
+
+        if self._is_valid_response(full_response):
+            for buffered_token in token_buffer:
+                yield AgentEvent(type="token", content=buffered_token)
+            self.conversation_history.append({"role": "assistant", "content": full_response})
+            self._trim_history()
+        else:
+            yield AgentEvent(type="token", content="Done!")
+            self.conversation_history.append({"role": "assistant", "content": "Done!"})
+
+        yield AgentEvent(type="done", content="", done=True)
+
+    # --- Tool argument validation ---
+
+    def _validate_tool_args(self, tool_name: str, arguments: dict) -> list[str]:
+        """Return list of missing required argument names (empty if all present)."""
+        schema = self.mcp.get_tool_schema(tool_name)
+        if not schema:
+            return []
+
+        required = schema.get("inputSchema", {}).get("required", [])
+        missing = []
+        for r in required:
+            val = arguments.get(r)
+            if val is None or (isinstance(val, str) and not val.strip()):
+                missing.append(r)
+        return missing
+
+    def _format_confirm_summary(self, tool_name: str, tool_args: dict) -> str:
+        """Format a human-readable confirmation prompt."""
+        if tool_name == "delete_file":
+            return f"⚠️ Delete file `{tool_args.get('path', '?')}`? This cannot be undone."
+        elif tool_name == "move_file":
+            return f"Move `{tool_args.get('source', '?')}` → `{tool_args.get('destination', '?')}`?"
+        elif tool_name == "execute_organize":
+            plan_id = tool_args.get("plan_id", "")
+            plan = self._organize_plans.get(plan_id)
+            if plan:
+                return f"Organize `{plan['path']}`: {plan['summary']}?"
+            return f"Execute organize plan `{plan_id}`?"
+        return f"Confirm: `{tool_name}` with {json.dumps(tool_args)}?"
+
+    # --- Streaming without tools (weak models) ---
+
     async def _stream_without_tools(self) -> AsyncIterator[AgentEvent]:
         messages = self._build_messages()
         async for token in self.model.generate(messages=messages, max_tokens=512):
@@ -165,6 +432,8 @@ class AgentOrchestrator:
                 continue
             yield AgentEvent(type="token", content=token)
         yield AgentEvent(type="done", content="", done=True)
+
+    # --- Message building ---
 
     def _build_messages(self) -> list[dict]:
         tool_cap = get_model_tool_capability(self.model.info.name)
@@ -178,6 +447,8 @@ class AgentOrchestrator:
         for msg in self.conversation_history[-10:]:
             messages.append(msg)
         return messages
+
+    # --- Tool call extraction ---
 
     def _extract_tool_call(self, text: str) -> dict | None:
         idx = text.find('"tool"')
@@ -243,6 +514,77 @@ class AgentOrchestrator:
                     return True
         return False
 
+    # --- Compose intent detection ---
+
+    _COMPOSE_KEYWORDS = re.compile(
+        r'\b(draft|compose|write|send|email|mail|email to)\b', re.IGNORECASE
+    )
+    _COMPOSE_VERBS = re.compile(
+        r'\b(draft|compose|write|send)\b', re.IGNORECASE
+    )
+    _TO_PATTERNS = [
+        re.compile(r'\bto\s+([a-zA-Z0-9._%+\-@ ]+)', re.IGNORECASE),
+        re.compile(r'\bemail\s+([a-zA-Z0-9._%+\-@ ]+)', re.IGNORECASE),
+        re.compile(r'\bmail\s+to\s+([a-zA-Z0-9._%+\-@ ]+)', re.IGNORECASE),
+    ]
+    _SUBJECT_PATTERNS = [
+        re.compile(r'\bsubject\s*:?\s*(.+?)(?:\s+body|\s+and\s+body|\s*$)', re.IGNORECASE),
+        re.compile(r'\babout\s+(.+?)(?:\s+body|\s+and\s+body|\s*$)', re.IGNORECASE),
+    ]
+    _BODY_PATTERNS = [
+        re.compile(r'\bbody\s*:?\s*(.+)', re.IGNORECASE),
+        re.compile(r'\bsaying\s+(.+)', re.IGNORECASE),
+        re.compile(r'\bthat\s+(.+)', re.IGNORECASE),
+        re.compile(r'\bcontent\s*:?\s*(.+)', re.IGNORECASE),
+    ]
+
+    def _is_compose_intent(self, message: str) -> dict | None:
+        """
+        Detect if the user wants to compose/send an email.
+        Returns extracted slots dict if detected, None otherwise.
+        The 1.5B model can't parse structured JSON from prose — this regex
+        bypasses the LLM entirely for the slot-filling step.
+        """
+        if not self._COMPOSE_KEYWORDS.search(message):
+            return None
+
+        # Must contain a compose verb (draft/compose/write/send)
+        if not self._COMPOSE_VERBS.search(message):
+            return None
+
+        slots = {}
+
+        # Extract "to"
+        for pattern in self._TO_PATTERNS:
+            m = pattern.search(message)
+            if m:
+                to_val = m.group(1).strip().rstrip('.')
+                if '@' in to_val or '.' in to_val:
+                    slots["to"] = to_val
+                break
+
+        # Extract "subject"
+        for pattern in self._SUBJECT_PATTERNS:
+            m = pattern.search(message)
+            if m:
+                slots["subject"] = m.group(1).strip().rstrip('.')
+                break
+
+        # Extract "body"
+        for pattern in self._BODY_PATTERNS:
+            m = pattern.search(message)
+            if m:
+                slots["body"] = m.group(1).strip().rstrip('.')
+                break
+
+        # If we couldn't extract a "to", this might not be a compose intent
+        # (e.g., "help me draft something" without specifics)
+        if "to" not in slots and "subject" not in slots and "body" not in slots:
+            return None
+
+        logger.info("Compose slots extracted: %s", slots)
+        return slots
+
     def _is_prompt_echo(self, text: str) -> bool:
         matches = sum(1 for p in _ECHO_PATTERNS if p.search(text))
         return matches >= 3
@@ -268,4 +610,6 @@ class AgentOrchestrator:
     def reset(self):
         self.conversation_history = []
         self._tool_call_count = 0
+        self._pending_state = None
+        self._organize_plans.clear()
         logger.info("Agent conversation reset")

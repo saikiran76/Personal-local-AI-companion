@@ -35,12 +35,9 @@ const BACKEND = {
  * SSE format: "event: name\ndata: json\n\n"
  */
 function parseSSE(buffer) {
-  // Normalize Windows \r\n to \n so split('\n\n') works reliably
   const normalized = buffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   const events = [];
   const parts = normalized.split('\n\n');
-
-  // Last part might be incomplete
   const complete = parts.slice(0, -1);
   const leftover = parts[parts.length - 1];
 
@@ -69,6 +66,103 @@ function parseSSE(buffer) {
   return { events, leftover };
 }
 
+/* ------------------------------------------------------------------ */
+/*  ComposeEmailForm — embedded in the chat stream                    */
+/* ------------------------------------------------------------------ */
+
+function ComposeEmailForm({ initialTo, initialSubject, initialBody, onDraft, onSend, onCancel }) {
+  const [to, setTo] = useState(initialTo || '');
+  const [subject, setSubject] = useState(initialSubject || '');
+  const [body, setBody] = useState(initialBody || '');
+  const [sending, setSending] = useState(false);
+
+  const handleDraft = async () => {
+    setSending(true);
+    try {
+      await onDraft({ to, subject, body });
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const handleSend = async () => {
+    setSending(true);
+    try {
+      await onSend({ to, subject, body });
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div className="compose-form">
+      <div className="compose-header">
+        <span className="compose-icon">✉️</span>
+        <span className="compose-title">Draft Email</span>
+      </div>
+      <div className="compose-fields">
+        <div className="compose-field">
+          <label>To</label>
+          <input
+            type="email"
+            placeholder="recipient@example.com"
+            value={to}
+            onChange={(e) => setTo(e.target.value)}
+          />
+        </div>
+        <div className="compose-field">
+          <label>Subject</label>
+          <input
+            type="text"
+            placeholder="Email subject"
+            value={subject}
+            onChange={(e) => setSubject(e.target.value)}
+          />
+        </div>
+        <div className="compose-field">
+          <label>Body</label>
+          <textarea
+            placeholder="Write your message..."
+            rows={4}
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+          />
+        </div>
+      </div>
+      <div className="compose-actions">
+        <button
+          className="compose-btn compose-save"
+          disabled={sending || !to.trim()}
+          onClick={handleDraft}
+        >
+          {sending ? 'Saving...' : 'Save Draft'}
+        </button>
+        <button
+          className="compose-btn compose-send"
+          disabled={sending || !to.trim()}
+          onClick={handleSend}
+        >
+          Open in Mail App
+        </button>
+        <button
+          className="compose-btn compose-cancel"
+          disabled={sending}
+          onClick={onCancel}
+        >
+          Cancel
+        </button>
+      </div>
+      <div className="compose-draft-note">
+        Drafts are saved locally in <code>~/.desktop-companion/drafts/</code>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  ChatScreen                                                        */
+/* ------------------------------------------------------------------ */
+
 export default function ChatScreen({ config, onReset, onBackendStatus, onModelAvailable }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
@@ -77,14 +171,20 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
   const [statusMessage, setStatusMessage] = useState('');
   const [modelInfo, setModelInfo] = useState(null);
   const [modelAvailable, setModelAvailable] = useState(false);
-  const [activeTool, setActiveTool] = useState(null); // currently executing tool
-  const [isThinking, setIsThinking] = useState(false); // model is generating (pre-tool)
+  const [activeTool, setActiveTool] = useState(null);
+  const [isThinking, setIsThinking] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
-  const [modelAdvisor, setModelAdvisor] = useState(null); // upgrade recommendation
+  const [modelAdvisor, setModelAdvisor] = useState(null);
+  const [pendingClarify, setPendingClarify] = useState(null);
+  const [pendingConfirm, setPendingConfirm] = useState(null);
+  const pendingClarifyRef = useRef(null);
+  const pendingConfirmRef = useRef(null);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
   const eventSourceRef = useRef(null);
   const abortRef = useRef(null);
+  const streamingRef = useRef(false);
+  const assistantMsgIdRef = useRef(null);
 
   const userName = config?.userName || 'User';
   const assistantName = config?.assistantName || 'Companion';
@@ -148,7 +248,6 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
       setStatusMessage('');
       console.log('Backend ready, tools:', data.tools, 'model_available:', data.model_available);
 
-      // Fetch model advisor recommendation
       fetch(`${BACKEND_URL}/models/advise`)
         .then((r) => r.json())
         .then((data) => {
@@ -164,8 +263,6 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
       setModelAvailable(false);
       onModelAvailable?.(false);
       setStatusMessage(`Model error: ${data.error}`);
-      // Don't set ERROR status — backend will still send backend_ready
-      // This keeps the app usable even when model fails
     });
 
     eventSource.addEventListener('model_missing', (e) => {
@@ -184,9 +281,26 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
     };
   }, []);
 
-  const sendMessage = async (text) => {
+  /* ---- Helpers to update a specific message by ID ---- */
+
+  const updateMessage = (msgId, updater) => {
+    setMessages((prev) => {
+      const updated = [...prev];
+      const target = updated.find((m) => m.id === msgId);
+      if (target) updater(target);
+      return updated;
+    });
+  };
+
+  /* ---- Send message ---- */
+
+  const sendMessage = async (text, isResponse = false) => {
     const trimmed = (text || input).trim();
-    if (!trimmed || isStreaming) return;
+    if (!trimmed || streamingRef.current) return;
+    streamingRef.current = true;
+
+    const hadClarify = pendingClarifyRef.current;
+    const hadConfirm = pendingConfirmRef.current;
 
     const userMsg = {
       id: Date.now(),
@@ -201,7 +315,16 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
     setIsThinking(false);
     setActiveTool(null);
 
-    // If backend is ready but no model, guide user to upload
+    setPendingClarify(null);
+    setPendingConfirm(null);
+    pendingClarifyRef.current = null;
+    pendingConfirmRef.current = null;
+
+    if (isResponse && (hadClarify || hadConfirm)) {
+      await streamFromBackend(trimmed, trimmed);
+      return;
+    }
+
     if ((backendStatus === BACKEND.READY || backendStatus === BACKEND.ERROR) && !modelAvailable) {
       await noModelResponse(trimmed);
     } else if (backendStatus === BACKEND.READY) {
@@ -211,7 +334,9 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
     }
   };
 
-  const streamFromBackend = async (message) => {
+  /* ---- SSE stream from backend ---- */
+
+  const streamFromBackend = async (message, response = null) => {
     const assistantMsg = {
       id: Date.now() + 1,
       role: 'assistant',
@@ -220,32 +345,30 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
       timestamp: new Date(),
     };
 
-    console.log('streamed agent message from backend: ', assistantMsg)
-
+    assistantMsgIdRef.current = assistantMsg.id;
     setMessages((prev) => [...prev, assistantMsg]);
 
     try {
       const controller = new AbortController();
       abortRef.current = controller;
 
-      const response = await fetch(`${BACKEND_URL}/chat`, {
+      const body = { message };
+      if (response) body.response = response;
+
+      const res = await fetch(`${BACKEND_URL}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      if (!res.body) throw new Error('Response body is null');
 
-      if (!response.body) {
-        throw new Error('Response body is null — backend may not support streaming');
-      }
-
-      const reader = response.body.getReader();
+      const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let sseBuffer = '';
+      const targetId = assistantMsgIdRef.current;
 
       try {
         while (true) {
@@ -261,13 +384,8 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
               case 'token':
                 setIsThinking(false);
                 if (event.data.content) {
-                  setMessages((prev) => {
-                    const updated = [...prev];
-                    const last = updated[updated.length - 1];
-                    if (last.role === 'assistant') {
-                      last.content += event.data.content;
-                    }
-                    return updated;
+                  updateMessage(targetId, (msg) => {
+                    msg.content += event.data.content;
                   });
                 }
                 break;
@@ -277,14 +395,9 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                 break;
 
               case 'clear':
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const last = updated[updated.length - 1];
-                  if (last.role === 'assistant') {
-                    last.content = '';
-                    last.toolCalls = [];
-                  }
-                  return updated;
+                updateMessage(targetId, (msg) => {
+                  msg.content = '';
+                  msg.toolCalls = [];
                 });
                 break;
 
@@ -295,41 +408,85 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                   arguments: event.data.arguments,
                   status: 'running',
                 });
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const last = updated[updated.length - 1];
-                  if (last.role === 'assistant') {
-                    last.toolCalls = [
-                      ...(last.toolCalls || []),
-                      {
-                        name: event.data.tool,
-                        arguments: event.data.arguments,
-                        status: 'running',
-                      },
-                    ];
-                  }
-                  return updated;
+                updateMessage(targetId, (msg) => {
+                  msg.toolCalls = [
+                    ...(msg.toolCalls || []),
+                    {
+                      name: event.data.tool,
+                      arguments: event.data.arguments,
+                      status: 'running',
+                    },
+                  ];
                 });
                 break;
 
               case 'tool_result':
                 setActiveTool(null);
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const last = updated[updated.length - 1];
-                  if (last.role === 'assistant' && last.toolCalls?.length > 0) {
-                    const toolCalls = [...last.toolCalls];
+                updateMessage(targetId, (msg) => {
+                  if (msg.toolCalls?.length > 0) {
+                    const toolCalls = [...msg.toolCalls];
                     const lastTool = toolCalls[toolCalls.length - 1];
                     toolCalls[toolCalls.length - 1] = {
                       ...lastTool,
                       status: 'done',
                       result: event.data.result,
                     };
-                    last.toolCalls = toolCalls;
+                    msg.toolCalls = toolCalls;
                   }
-                  return updated;
                 });
                 break;
+
+              case 'clarify':
+                setIsThinking(false);
+                setActiveTool(null);
+                setPendingClarify({
+                  message: event.data.message,
+                  tool: event.data.tool,
+                  arguments: event.data.arguments,
+                });
+                pendingClarifyRef.current = {
+                  message: event.data.message,
+                  tool: event.data.tool,
+                  arguments: event.data.arguments,
+                };
+                updateMessage(targetId, (msg) => {
+                  msg.content = event.data.message;
+                });
+                break;
+
+              case 'confirm':
+                setIsThinking(false);
+                setActiveTool(null);
+                setPendingConfirm({
+                  message: event.data.message,
+                  tool: event.data.tool,
+                  arguments: event.data.arguments,
+                });
+                pendingConfirmRef.current = {
+                  message: event.data.message,
+                  tool: event.data.tool,
+                  arguments: event.data.arguments,
+                };
+                updateMessage(targetId, (msg) => {
+                  msg.content = event.data.message;
+                });
+                break;
+
+              case 'compose_form': {
+                setIsThinking(false);
+                setActiveTool(null);
+                const args = event.data.arguments || {};
+                // Embed the compose form directly into the assistant message
+                updateMessage(targetId, (msg) => {
+                  msg.composeForm = {
+                    to: args.to || '',
+                    subject: args.subject || '',
+                    body: args.body || '',
+                  };
+                  msg.content = event.data.message || '';
+                });
+                break;
+              }
 
               case 'done':
                 setIsThinking(false);
@@ -339,13 +496,8 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
               case 'error':
                 setIsThinking(false);
                 setActiveTool(null);
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const last = updated[updated.length - 1];
-                  if (last.role === 'assistant' && !last.content) {
-                    last.content = `Error: ${event.data.error}`;
-                  }
-                  return updated;
+                updateMessage(targetId, (msg) => {
+                  if (!msg.content) msg.content = `Error: ${event.data.error}`;
                 });
                 break;
             }
@@ -356,22 +508,86 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
       }
     } catch (err) {
       if (err.name !== 'AbortError') {
-        setMessages((prev) => {
-          const updated = [...prev];
-          const last = updated[updated.length - 1];
-          if (last.role === 'assistant' && !last.content) {
-            last.content = 'Error connecting to backend. Please try again.';
-          }
-          return updated;
+        updateMessage(assistantMsgIdRef.current, (msg) => {
+          if (!msg.content) msg.content = 'Error connecting to backend. Please try again.';
         });
       }
     } finally {
+      streamingRef.current = false;
       setIsStreaming(false);
       setIsThinking(false);
       setActiveTool(null);
+      assistantMsgIdRef.current = null;
       abortRef.current = null;
     }
   };
+
+  /* ---- Compose form actions (instant — no LLM round-trip) ---- */
+
+  const handleComposeDraft = async (slots) => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/tools/call`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tool_name: 'draft_email',
+          tool_args: { to: slots.to, subject: slots.subject, body: slots.body },
+        }),
+      });
+      const result = await res.json();
+      const filename = result.filename || 'email.eml';
+      setMessages((prev) => [...prev, {
+        id: Date.now(),
+        role: 'assistant',
+        content: `Draft saved locally as \`${filename}\`.\n\nOpen your email app to send it, or I can open your mail client now.`,
+        toolCalls: [{ name: 'draft_email', status: 'done', result: `Saved as ${filename}` }],
+        timestamp: new Date(),
+      }]);
+    } catch {
+      setMessages((prev) => [...prev, {
+        id: Date.now(),
+        role: 'assistant',
+        content: 'Error saving draft. Please try again.',
+        timestamp: new Date(),
+      }]);
+    }
+  };
+
+  const handleComposeSend = async (slots) => {
+    const params = new URLSearchParams();
+    if (slots.to) params.set('to', slots.to);
+    if (slots.subject) params.set('subject', slots.subject);
+    if (slots.body) params.set('body', slots.body);
+    const mailtoUrl = `mailto:?${params.toString()}`;
+    try {
+      await fetch(`${BACKEND_URL}/tools/call`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tool_name: 'open_email_client',
+          tool_args: { url: mailtoUrl },
+        }),
+      });
+    } catch { /* mailto is best-effort */ }
+    setMessages((prev) => [...prev, {
+      id: Date.now(),
+      role: 'assistant',
+      content: 'Opened your email client. The draft is ready to send.',
+      toolCalls: [{ name: 'open_email_client', status: 'done', result: 'Opened' }],
+      timestamp: new Date(),
+    }]);
+  };
+
+  const handleComposeCancel = () => {
+    setMessages((prev) => [...prev, {
+      id: Date.now(),
+      role: 'assistant',
+      content: 'Okay, cancelled.',
+      timestamp: new Date(),
+    }]);
+  };
+
+  /* ---- Mock / no-model responses ---- */
 
   const mockResponse = async () => {
     const responses = [
@@ -379,7 +595,6 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
       "Once the backend is running, I'll have access to file system tools, note management, and browser automation.",
       "Great question! The backend will process this using the local model running on your device.",
     ];
-
     const response = responses[Math.floor(Math.random() * responses.length)];
 
     const assistantMsg = {
@@ -402,10 +617,10 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
       });
     }
     setIsStreaming(false);
+    streamingRef.current = false;
   };
 
   const noModelResponse = async (userMessage) => {
-    // Intelligent responses based on what the user asked
     const lower = userMessage.toLowerCase();
     let response;
 
@@ -428,7 +643,6 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
     };
     setMessages((prev) => [...prev, assistantMsg]);
 
-    // Stream the response character by character
     for (let i = 0; i < response.length; i += 3) {
       await new Promise((r) => setTimeout(r, 12));
       const chunk = response.slice(0, i + 3);
@@ -440,7 +654,10 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
       });
     }
     setIsStreaming(false);
+    streamingRef.current = false;
   };
+
+  /* ---- Input handling ---- */
 
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -557,7 +774,6 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
               </p>
             )}
 
-            {/* No model prompt */}
             {(backendStatus === BACKEND.READY || backendStatus === BACKEND.ERROR) && !modelAvailable && (
               <div className="chat-no-model-prompt">
                 <div className="chat-no-model-icon">
@@ -576,7 +792,6 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
               </div>
             )}
 
-            {/* Model upgrade advisor */}
             {modelAvailable && modelAdvisor && (
               <div className="chat-advisor-banner">
                 <div className="chat-advisor-icon">
@@ -597,7 +812,6 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
               </div>
             )}
 
-            {/* Suggestions (only show when model is available) */}
             {modelAvailable && (
               <div className="chat-suggestions">
                 {SUGGESTIONS.map((s) => (
@@ -621,11 +835,11 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                       : getInitial(userName)}
                   </div>
                   <div className="message-body">
-                    {/* Tool calls indicator */}
+                    {/* Tool calls — prominent badge style */}
                     {msg.toolCalls?.length > 0 && (
                       <div className="tool-calls">
                         {msg.toolCalls.map((tc, i) => (
-                          <div key={i} className={`tool-call ${tc.status}`}>
+                          <div key={i} className={`tool-call tool-call-${tc.status}`}>
                             <span className="tool-call-icon">
                               {tc.status === 'running' ? '⚙️' : '✅'}
                             </span>
@@ -647,15 +861,77 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                       </div>
                     )}
 
+                    {/* Compose form — embedded inline in the message */}
+                    {msg.composeForm && (
+                      <ComposeEmailForm
+                        initialTo={msg.composeForm.to}
+                        initialSubject={msg.composeForm.subject}
+                        initialBody={msg.composeForm.body}
+                        onDraft={handleComposeDraft}
+                        onSend={handleComposeSend}
+                        onCancel={handleComposeCancel}
+                      />
+                    )}
+
                     <div className="message-timestamp">
                       {formatTime(msg.timestamp)}
                     </div>
                   </div>
                 </div>
               ))}
-              
 
-              {/* Thinking indicator — model is generating, no tool yet */}
+              {/* Clarify prompt */}
+              {pendingClarify && !isStreaming && (
+                <div className="clarify-prompt">
+                  <div className="clarify-icon">💬</div>
+                  <div className="clarify-actions">
+                    <input
+                      className="clarify-input"
+                      type="text"
+                      placeholder="Type your answer..."
+                      value={input}
+                      onChange={(e) => setInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          sendMessage(input, true);
+                        }
+                      }}
+                      autoFocus
+                    />
+                    <button
+                      className="clarify-send-btn"
+                      disabled={!input.trim()}
+                      onClick={() => sendMessage(input, true)}
+                    >
+                      Send
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Confirm prompt */}
+              {pendingConfirm && !isStreaming && (
+                <div className="confirm-prompt">
+                  <div className="confirm-icon">⚠️</div>
+                  <div className="confirm-actions">
+                    <button
+                      className="confirm-btn confirm-yes"
+                      onClick={() => sendMessage('yes', true)}
+                    >
+                      Confirm
+                    </button>
+                    <button
+                      className="confirm-btn confirm-no"
+                      onClick={() => sendMessage('no', true)}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Thinking indicator */}
               {isThinking && isStreaming && !activeTool && (
                 <div className="message message-assistant">
                   <div className="message-avatar">
@@ -663,30 +939,30 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                   </div>
                   <div className="message-body">
                     <div className="message-content">
-
                       <div className="typing-indicator">
                         <div className="typing-dot" />
                         <div className="typing-dot" />
                         <div className="typing-dot" />
-                      
                       </div>
-                      {/* <div>thinking state: {isThinking}, isStreaming: {isStreaming}, and activeTool: {activeTool ? activeTool.name : 'None'}</div> */}
                     </div>
                   </div>
                 </div>
               )}
 
-              {/* console.log('activeTool state: ', activeTool, 'isStreaming state:', isStreaming); */}
-
-              {/* Active tool indicator — tool is executing */}
+              {/* Active tool indicator — prominent bar */}
               {activeTool && isStreaming && (
                 <div className="tool-status-bar">
-                  <span className="spinner" style={{ width: 12, height: 12, borderWidth: 1.5 }} />
-                  <span>Using {activeTool.name}...</span>
+                  <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} />
+                  <span className="tool-status-name">{activeTool.name}</span>
+                  <span className="tool-status-dots">
+                    <span className="typing-dot" />
+                    <span className="typing-dot" />
+                    <span className="typing-dot" />
+                  </span>
                 </div>
               )}
 
-              {/* Typing indicator — waiting for backend, not thinking, no tool */}
+              {/* Typing indicator */}
               {isStreaming && !isThinking && !activeTool && (
                 <div className="message message-assistant">
                   <div className="message-avatar">
@@ -717,7 +993,9 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                 className="chat-input"
                 rows={1}
                 placeholder={
-                  isModelLoading ? 'Model is loading...'
+                  pendingClarify ? 'Type your answer above...'
+                  : pendingConfirm ? 'Click Confirm or Cancel above...'
+                  : isModelLoading ? 'Model is loading...'
                   : isThinking ? 'Thinking...'
                   : activeTool ? `${activeTool.name} running...`
                   : `Message ${assistantName}...`
@@ -725,7 +1003,7 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                disabled={isModelLoading}
+                disabled={isModelLoading || !!pendingClarify || !!pendingConfirm}
               />
               <button
                 className="chat-send-btn"
@@ -757,15 +1035,11 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
           onImported={(models, modelLoaded) => {
             console.log('Models imported:', models, 'model_loaded:', modelLoaded);
             setShowImportModal(false);
-
-            // Reset messages and re-handshake with backend
             setMessages([]);
             setModelInfo(null);
             setModelAvailable(false);
             setBackendStatus(BACKEND.CONNECTING);
             setStatusMessage('Model imported. Reloading...');
-
-            // Close existing SSE and reconnect to trigger fresh model load
             eventSourceRef.current?.close();
             setTimeout(() => connectToBackend(), 500);
           }}

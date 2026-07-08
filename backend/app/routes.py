@@ -230,11 +230,12 @@ async def chat(request: Request):
     """
     Streaming chat endpoint. Streams AgentEvents via SSE.
 
-    Request:  { "message": "user prompt" }
-    Events:   token, clear, thinking, tool_call, tool_result, done, error
+    Request:  { "message": "...", "response": "..." (optional, for clarify/confirm resume) }
+    Events:   token, clear, thinking, tool_call, tool_result, done, error, clarify, confirm, compose_form
     """
     body = await request.json()
     user_message = body.get("message", "")
+    user_response = body.get("response")
 
     if not user_message:
         return {"error": "No message provided"}
@@ -244,7 +245,7 @@ async def chat(request: Request):
 
     async def stream_response():
         try:
-            async for event in _agent.chat(user_message):
+            async for event in _agent.chat(user_message, user_response=user_response):
                 if event.type == "token":
                     yield {
                         "event": "token",
@@ -274,9 +275,35 @@ async def chat(request: Request):
                             "result": event.tool_result,
                         }),
                     }
-                    # Send immediate ping to keep connection alive during next round
-                    await asyncio.sleep(0.01)  # flush event
+                    await asyncio.sleep(0.01)
                     yield {"event": "ping", "data": "{}"}
+                elif event.type == "clarify":
+                    yield {
+                        "event": "clarify",
+                        "data": json.dumps({
+                            "message": event.content,
+                            "tool": event.tool_name,
+                            "arguments": event.tool_args,
+                        }),
+                    }
+                elif event.type == "compose_form":
+                    yield {
+                        "event": "compose_form",
+                        "data": json.dumps({
+                            "message": event.content,
+                            "tool": event.tool_name,
+                            "arguments": event.tool_args,
+                        }),
+                    }
+                elif event.type == "confirm":
+                    yield {
+                        "event": "confirm",
+                        "data": json.dumps({
+                            "message": event.content,
+                            "tool": event.tool_name,
+                            "arguments": event.tool_args,
+                        }),
+                    }
                 elif event.type == "done":
                     yield {"event": "done", "data": json.dumps({})}
                 elif event.type == "error":
@@ -296,6 +323,31 @@ async def reset():
     if _agent:
         _agent.reset()
     return {"status": "reset"}
+
+
+@router.post("/tools/call")
+async def tools_call(request: Request):
+    """
+    Direct tool invocation endpoint — used by compose form and other
+    UI components that need to call MCP tools without going through
+    the full agent ReAct loop.
+    """
+    if _mcp_manager is None:
+        return {"error": "MCP manager not initialized"}
+
+    body = await request.json()
+    tool_name = body.get("tool_name")
+    tool_args = body.get("tool_args", {})
+
+    if not tool_name:
+        return {"error": "No tool_name provided"}
+
+    try:
+        result = await _mcp_manager.call_tool(tool_name, tool_args)
+        return {"result": result}
+    except Exception as e:
+        logger.error("Tool call failed: %s", e)
+        return {"error": str(e)}
 
 
 @router.get("/models/list")

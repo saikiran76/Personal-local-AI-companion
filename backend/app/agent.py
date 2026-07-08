@@ -15,7 +15,11 @@ SYSTEM_PROMPT = """You are a helpful desktop AI assistant running locally on the
 You have access to tools for file system operations, note management, and browser automation.
 Always prioritize user privacy — all processing happens locally.
 Be concise, helpful, and proactive. Use tools when they would help accomplish the task.
-Attempt a tool call even with partial information — the system will ask the user for anything missing."""
+Attempt a tool call even with partial information — the system will ask the user for anything missing.
+
+IMPORTANT: Never fabricate user data like email addresses, names, or file contents.
+If a tool requires user-provided values (like an email address or subject), use the placeholder
+"ask_user" and the system will request the information from the user."""
 
 MAX_TOOL_ROUNDS = 5
 
@@ -32,7 +36,7 @@ _ECHO_PATTERNS = [
 
 _MIN_RESPONSE_LENGTH = 10
 
-_CONFIRMATION_TOOLS = {"delete_file", "move_file", "execute_organize"}
+_CONFIRMATION_TOOLS = {"delete_file", "move_file", "execute_organize", "draft_email", "open_email_client"}
 
 
 @dataclass
@@ -212,6 +216,15 @@ class AgentOrchestrator:
                     "content": f"Tool '{tool_name}' result:\n{tool_result}",
                 })
                 self._trim_history()
+
+                # If tool succeeded, emit direct ack — no next LLM round
+                if '"error"' not in tool_result:
+                    ack = self._tool_ack_message(tool_name, tool_args, tool_result)
+                    yield AgentEvent(type="token", content=ack)
+                    self.conversation_history.append({"role": "assistant", "content": ack})
+                    self._trim_history()
+                    yield AgentEvent(type="done", content="", done=True)
+                    return
                 continue
 
             else:
@@ -315,9 +328,17 @@ class AgentOrchestrator:
         })
         self._trim_history()
 
-        # Let LLM generate a final response based on tool result
-        async for event in self._final_response_round():
-            yield event
+        # If tool failed, let LLM explain. If succeeded, emit a direct
+        # acknowledgment — no LLM round, no duplication risk.
+        if '"error"' in tool_result:
+            async for event in self._final_response_round():
+                yield event
+        else:
+            ack = self._tool_ack_message(tool_name, tool_args, tool_result)
+            yield AgentEvent(type="token", content=ack)
+            self.conversation_history.append({"role": "assistant", "content": ack})
+            self._trim_history()
+            yield AgentEvent(type="done", content="", done=True)
 
     async def _handle_confirm_resume(
         self, pending: dict, user_response: str
@@ -364,8 +385,15 @@ class AgentOrchestrator:
         })
         self._trim_history()
 
-        async for event in self._final_response_round():
-            yield event
+        if '"error"' in tool_result:
+            async for event in self._final_response_round():
+                yield event
+        else:
+            ack = self._tool_ack_message(tool_name, tool_args, tool_result)
+            yield AgentEvent(type="token", content=ack)
+            self.conversation_history.append({"role": "assistant", "content": ack})
+            self._trim_history()
+            yield AgentEvent(type="done", content="", done=True)
 
     async def _final_response_round(self) -> AsyncIterator[AgentEvent]:
         """One more LLM round to generate a natural language response after tool execution."""
@@ -421,7 +449,45 @@ class AgentOrchestrator:
             if plan:
                 return f"Organize `{plan['path']}`: {plan['summary']}?"
             return f"Execute organize plan `{plan_id}`?"
+        elif tool_name == "draft_email":
+            to = tool_args.get("to", "?")
+            subject = tool_args.get("subject", "(no subject)")
+            return f'Save email draft to `{to}` with subject "{subject}"?'
+        elif tool_name == "open_email_client":
+            return "Open your email client with the draft?"
         return f"Confirm: `{tool_name}` with {json.dumps(tool_args)}?"
+
+    def _tool_ack_message(self, tool_name: str, tool_args: dict, tool_result: str) -> str:
+        """Generate a brief, tool-specific acknowledgment after successful execution."""
+        if tool_name == "draft_email":
+            to = tool_args.get("to", "")
+            subject = tool_args.get("subject", "")
+            parts = ["Draft saved"]
+            if to:
+                parts.append(f"for {to}")
+            if subject:
+                parts.append(f'with subject "{subject}"')
+            return " ".join(parts) + "."
+        elif tool_name == "open_email_client":
+            return "Opened your email client."
+        elif tool_name == "delete_file":
+            return f"Deleted `{tool_args.get('path', 'file')}`."
+        elif tool_name == "move_file":
+            return f"Moved `{tool_args.get('source', '?')}` → `{tool_args.get('destination', '?')}`."
+        elif tool_name == "create_note":
+            return f"Note saved as `{tool_args.get('filename', 'note')}`."
+        elif tool_name == "write_file":
+            return f"Wrote to `{tool_args.get('path', 'file')}`."
+        elif tool_name == "read_file":
+            return f"Read `{tool_args.get('path', 'file')}`."
+        elif tool_name == "list_directory":
+            return f"Listed `{tool_args.get('path', 'directory')}`."
+        elif tool_name == "open_browser":
+            return f"Opened browser."
+        elif tool_name == "search_web":
+            return f"Searched for `{tool_args.get('query', '?')}`."
+        else:
+            return f"Done — {tool_name} completed."
 
     # --- Streaming without tools (weak models) ---
 
@@ -516,11 +582,11 @@ class AgentOrchestrator:
 
     # --- Compose intent detection ---
 
-    _COMPOSE_KEYWORDS = re.compile(
-        r'\b(draft|compose|write|send|email|mail|email to)\b', re.IGNORECASE
-    )
     _COMPOSE_VERBS = re.compile(
-        r'\b(draft|compose|write|send)\b', re.IGNORECASE
+        r'\b(draft|compose|write|send|create)\b', re.IGNORECASE
+    )
+    _COMPOSE_NOUN = re.compile(
+        r'\b(e[\-]?mail|mail)\b', re.IGNORECASE
     )
     _TO_PATTERNS = [
         re.compile(r'\bto\s+([a-zA-Z0-9._%+\-@ ]+)', re.IGNORECASE),
@@ -542,14 +608,17 @@ class AgentOrchestrator:
         """
         Detect if the user wants to compose/send an email.
         Returns extracted slots dict if detected, None otherwise.
-        The 1.5B model can't parse structured JSON from prose — this regex
-        bypasses the LLM entirely for the slot-filling step.
+        Fires before model.generate() — zero LLM involvement.
         """
-        if not self._COMPOSE_KEYWORDS.search(message):
-            return None
+        # Must match verb + "email/mail" (e.g. "write an email", "send mail to X")
+        has_verb = self._COMPOSE_VERBS.search(message)
+        has_noun = self._COMPOSE_NOUN.search(message)
 
-        # Must contain a compose verb (draft/compose/write/send)
-        if not self._COMPOSE_VERBS.search(message):
+        # Also match bare "email to X" / "mail to X" patterns
+        has_email_to = re.search(r'\bemail\s+to\s+', message, re.IGNORECASE)
+        has_mail_to = re.search(r'\bmail\s+to\s+', message, re.IGNORECASE)
+
+        if not (has_verb and has_noun) and not has_email_to and not has_mail_to:
             return None
 
         slots = {}
@@ -577,11 +646,8 @@ class AgentOrchestrator:
                 slots["body"] = m.group(1).strip().rstrip('.')
                 break
 
-        # If we couldn't extract a "to", this might not be a compose intent
-        # (e.g., "help me draft something" without specifics)
-        if "to" not in slots and "subject" not in slots and "body" not in slots:
-            return None
-
+        # Return slots — even empty slots trigger the compose form
+        # The form lets the user fill in what they didn't specify
         logger.info("Compose slots extracted: %s", slots)
         return slots
 

@@ -6,11 +6,15 @@ Reads stdin synchronously in a thread to avoid Windows ProactorEventLoop bugs.
 """
 
 import json
+import logging
 import sys
 import webbrowser
 from datetime import datetime
 from email.utils import formatdate
 from pathlib import Path
+
+logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+logger = logging.getLogger("email")
 
 
 _DRAFTS_DIR = Path.home() / ".desktop-companion" / "drafts"
@@ -132,10 +136,9 @@ def _execute_tool(tool_name: str, arguments: dict) -> dict:
 
         # Check body length
         if len(body) > _MAILTO_MAX_BODY:
-            # Fall back to saving a draft instead
             return _execute_tool("draft_email", arguments)
 
-        # Build mailto: URL
+        # Build mailto: URL with proper encoding
         import urllib.parse
         params = {}
         if subject:
@@ -144,11 +147,39 @@ def _execute_tool(tool_name: str, arguments: dict) -> dict:
             params["body"] = body
 
         query = urllib.parse.urlencode(params)
-        mailto_url = f"mailto:{to}?{query}" if query else f"mailto:{to}"
+        encoded_to = urllib.parse.quote(to, safe="") if to else ""
+        mailto_url = f"mailto:{encoded_to}?{query}" if query else f"mailto:{encoded_to}"
 
-        webbrowser.open(mailto_url)
+        logger.info("Opening mailto: %s", mailto_url)
 
-        return {"content": [{"type": "text", "text": f"Opened email client for {to}"}]}
+        # Temporary debug — bypasses subprocess logging blind spot
+        debug_path = Path.home() / ".desktop-companion" / "mailto_debug.txt"
+        debug_path.write_text(mailto_url, encoding="utf-8")
+
+        try:
+            success = webbrowser.open(mailto_url)
+            if not success:
+                logger.warning("webbrowser.open returned False — no default mail client?")
+                # Fall back to saving a draft
+                draft_result = _execute_tool("draft_email", arguments)
+                text = draft_result.get("content", [{}])[0].get("text", "")
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": f"No default mail app found on this system. Draft saved instead: {text}",
+                    }]
+                }
+            return {"content": [{"type": "text", "text": f"Opened email client for {to}"}]}
+        except OSError as e:
+            logger.error("webbrowser.open OSError: %s", e)
+            draft_result = _execute_tool("draft_email", arguments)
+            text = draft_result.get("content", [{}])[0].get("text", "")
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": f"Could not open mail client ({e}). Draft saved instead: {text}",
+                }]
+            }
 
     elif tool_name == "list_drafts":
         drafts = []

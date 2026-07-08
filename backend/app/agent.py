@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 
 from .model_loader import ModelLoader, get_model_tool_capability
 from .mcp_client import MCPClientManager
+from .database import db
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,8 @@ Always prioritize user privacy — all processing happens locally.
 Be concise, helpful, and proactive. Use tools when they would help accomplish the task.
 Attempt a tool call even with partial information — the system will ask the user for anything missing.
 
-IMPORTANT: Never fabricate user data like email addresses, names, or file contents.
+IMPORTANT: Only act on the user's most recent message. Do not continue a previous task unless the user explicitly references it.
+Never fabricate user data like email addresses, names, or file contents.
 If a tool requires user-provided values (like an email address or subject), use the placeholder
 "ask_user" and the system will request the information from the user."""
 
@@ -70,6 +72,7 @@ class AgentOrchestrator:
         self._tool_call_count = 0
         self._pending_state: dict | None = None
         self._organize_plans: dict[str, dict] = {}  # plan_id → {moves, path, summary}
+        self._conversation_id: int | None = None
 
     async def initialize(self):
         await self.mcp.connect_all()
@@ -102,7 +105,10 @@ class AgentOrchestrator:
         compose_slots = self._is_compose_intent(user_message)
         if compose_slots is not None:
             logger.info("Compose intent detected: %s", compose_slots)
+            if self._conversation_id is None:
+                self._conversation_id = db.create_conversation(title=user_message[:80])
             self.conversation_history.append({"role": "user", "content": user_message})
+            db.add_message(self._conversation_id, "user", user_message)
             yield AgentEvent(
                 type="compose_form",
                 content=json.dumps(compose_slots),
@@ -111,8 +117,25 @@ class AgentOrchestrator:
             )
             return
 
+        # --- Organize intent bypass: short-circuit LLM for file organization ---
+        organize_path = self._is_organize_intent(user_message)
+        if organize_path is not None:
+            logger.info("Organize intent detected for path: %s", organize_path)
+            if self._conversation_id is None:
+                self._conversation_id = db.create_conversation(title=user_message[:80])
+            self.conversation_history.append({"role": "user", "content": user_message})
+            db.add_message(self._conversation_id, "user", user_message)
+            async for event in self._handle_organize_intent(organize_path):
+                yield event
+            return
+
         # --- Normal flow ---
+        # Create a conversation if we don't have one yet
+        if self._conversation_id is None:
+            self._conversation_id = db.create_conversation(title=user_message[:80])
+
         self.conversation_history.append({"role": "user", "content": user_message})
+        db.add_message(self._conversation_id, "user", user_message)
 
         model_name = self.model.info.name
         tool_cap = get_model_tool_capability(model_name)
@@ -210,12 +233,23 @@ class AgentOrchestrator:
                     tool_result=tool_result,
                 )
 
-                self.conversation_history.append({"role": "assistant", "content": full_response})
+                # Store summaries, not full content — keeps context lean for next round
+                summary_response = full_response[:200] + "..." if len(full_response) > 200 else full_response
+                summary_result = tool_result[:300] + "..." if len(tool_result) > 300 else tool_result
+                self.conversation_history.append({"role": "assistant", "content": summary_response})
                 self.conversation_history.append({
                     "role": "tool",
-                    "content": f"Tool '{tool_name}' result:\n{tool_result}",
+                    "content": f"Tool '{tool_name}' result:\n{summary_result}",
                 })
                 self._trim_history()
+
+                # Persist to database
+                if self._conversation_id:
+                    db.add_message(self._conversation_id, "assistant", summary_response)
+                    db.add_message(self._conversation_id, "tool", summary_result)
+                    # Log activity with scope based on tool
+                    scope = self._tool_scope(tool_name)
+                    db.log_activity(scope, tool_name, self._tool_ack_message(tool_name, tool_args, tool_result)[:100])
 
                 # If tool succeeded, emit direct ack — no next LLM round
                 if '"error"' not in tool_result:
@@ -234,6 +268,8 @@ class AgentOrchestrator:
                         yield AgentEvent(type="token", content=buffered_token)
                     self.conversation_history.append({"role": "assistant", "content": full_response})
                     self._trim_history()
+                    if self._conversation_id:
+                        db.add_message(self._conversation_id, "assistant", full_response)
                     yield AgentEvent(type="done", content="", done=True)
                     return
                 else:
@@ -262,6 +298,8 @@ class AgentOrchestrator:
 
         # Add exchange to history so LLM sees the clarification
         self.conversation_history.append({"role": "user", "content": user_message})
+        if self._conversation_id:
+            db.add_message(self._conversation_id, "user", user_message)
 
         # Check if more fields are missing
         still_missing = self._validate_tool_args(tool_name, tool_args)
@@ -322,11 +360,18 @@ class AgentOrchestrator:
             tool_result=tool_result,
         )
 
+        summary_result = tool_result[:300] + "..." if len(tool_result) > 300 else tool_result
         self.conversation_history.append({
             "role": "tool",
-            "content": f"Tool '{tool_name}' result:\n{tool_result}",
+            "content": f"Tool '{tool_name}' result:\n{summary_result}",
         })
         self._trim_history()
+
+        # Persist
+        if self._conversation_id:
+            db.add_message(self._conversation_id, "tool", summary_result)
+            scope = self._tool_scope(tool_name)
+            db.log_activity(scope, tool_name, self._tool_ack_message(tool_name, tool_args, tool_result)[:100])
 
         # If tool failed, let LLM explain. If succeeded, emit a direct
         # acknowledgment — no LLM round, no duplication risk.
@@ -379,11 +424,18 @@ class AgentOrchestrator:
             tool_result=tool_result,
         )
 
+        summary_result = tool_result[:300] + "..." if len(tool_result) > 300 else tool_result
         self.conversation_history.append({
             "role": "tool",
-            "content": f"Tool '{tool_name}' result:\n{tool_result}",
+            "content": f"Tool '{tool_name}' result:\n{summary_result}",
         })
         self._trim_history()
+
+        # Persist
+        if self._conversation_id:
+            db.add_message(self._conversation_id, "tool", summary_result)
+            scope = self._tool_scope(tool_name)
+            db.log_activity(scope, tool_name, self._tool_ack_message(tool_name, tool_args, tool_result)[:100])
 
         if '"error"' in tool_result:
             async for event in self._final_response_round():
@@ -651,6 +703,131 @@ class AgentOrchestrator:
         logger.info("Compose slots extracted: %s", slots)
         return slots
 
+    # --- Organize intent detection ---
+
+    _ORGANIZE_VERBS = re.compile(
+        r'\b(organize|clean\s*up|tidy|sort|arrange| declutter)\b', re.IGNORECASE
+    )
+    _ORGANIZE_NOUNS = re.compile(
+        r'\b(folder|directory|downloads?|desktop|documents?|pictures?|files?)\b',
+        re.IGNORECASE,
+    )
+    _PATH_KEYWORDS = {
+        "downloads": "downloads",
+        "download": "downloads",
+        "desktop": "desktop",
+        "documents": "documents",
+        "document": "documents",
+        "pictures": "pictures",
+        "picture": "pictures",
+        "photos": "pictures",
+        "music": "music",
+        "videos": "videos",
+        "home": "home",
+    }
+
+    def _is_organize_intent(self, message: str) -> str | None:
+        """
+        Detect if the user wants to organize/clean up a folder.
+        Returns the resolved path if detected, None otherwise.
+        """
+        has_verb = self._ORGANIZE_VERBS.search(message)
+        has_noun = self._ORGANIZE_NOUNS.search(message)
+
+        if not has_verb and not has_noun:
+            return None
+
+        # Must have at least a verb OR a noun that strongly implies organize
+        # "downloads looks messy" → noun alone is enough if it's a known folder
+        if not has_verb:
+            # Only trigger on noun if the message also implies disorder
+            disorder_words = re.compile(
+                r'\b(messy|cluttered|disorganized|chaotic|full of|clean|tidy|sort)\b',
+                re.IGNORECASE,
+            )
+            if not disorder_words.search(message):
+                return None
+
+        # Try to extract a specific folder reference
+        for keyword, alias in self._PATH_KEYWORDS.items():
+            if re.search(r'\b' + keyword + r'\b', message, re.IGNORECASE):
+                from pathlib import Path
+                path = Path.home() / alias
+                if path.exists():
+                    return str(path)
+
+        # Default to Downloads if verb matches but no specific path
+        if has_verb:
+            from pathlib import Path
+            default = Path.home() / "Downloads"
+            if default.exists():
+                return str(default)
+
+        return None
+
+    async def _handle_organize_intent(self, path: str) -> AsyncIterator[AgentEvent]:
+        """Handle organize intent — call preview_organize directly, skip LLM."""
+        yield AgentEvent(type="thinking", content="Scanning folder...")
+
+        try:
+            tool_result = await self.mcp.call_tool("preview_organize", {"path": path})
+        except Exception as e:
+            yield AgentEvent(type="token", content=f"Error scanning folder: {e}")
+            yield AgentEvent(type="done", content="", done=True)
+            return
+
+        self._tool_call_count += 1
+
+        yield AgentEvent(
+            type="tool_call",
+            content="Scanning folder structure...",
+            tool_name="preview_organize",
+            tool_args={"path": path},
+        )
+        yield AgentEvent(
+            type="tool_result",
+            content=tool_result,
+            tool_name="preview_organize",
+            tool_result=tool_result,
+        )
+
+        # Parse the result to find plan_id and summary
+        import json as json_mod
+        try:
+            result_data = json_mod.loads(tool_result) if isinstance(tool_result, str) else tool_result
+        except (json_mod.JSONDecodeError, TypeError):
+            result_data = {}
+
+        plan_id = result_data.get("plan_id", "")
+        summary = result_data.get("summary", "organize files by type")
+        planned_moves = result_data.get("planned_moves", [])
+
+        if not planned_moves:
+            yield AgentEvent(type="token", content="No files to organize — the folder is already tidy.")
+            yield AgentEvent(type="done", content="", done=True)
+            return
+
+        # Store the plan for later execution
+        self._organize_plans[plan_id] = {
+            "path": path,
+            "summary": summary,
+            "moves": planned_moves,
+        }
+
+        # Ask for confirmation
+        summary_text = f"Organize `{path}`: {summary} ({len(planned_moves)} files to move)"
+        self._pending_state = {
+            "type": "confirm",
+            "tool_name": "execute_organize",
+            "tool_args": {"plan_id": plan_id},
+        }
+        yield AgentEvent(
+            type="confirm",
+            content=summary_text,
+            tool_name="execute_organize",
+            tool_args={"plan_id": plan_id},
+        )
+
     def _is_prompt_echo(self, text: str) -> bool:
         matches = sum(1 for p in _ECHO_PATTERNS if p.search(text))
         return matches >= 3
@@ -670,12 +847,33 @@ class AgentOrchestrator:
         return True
 
     def _trim_history(self):
-        if len(self.conversation_history) > 20:
+        before = len(self.conversation_history)
+        if before > 20:
             self.conversation_history = self.conversation_history[-10:]
+            logger.info("History trimmed: %d → %d messages", before, len(self.conversation_history))
 
-    def reset(self):
+    _TOOL_SCOPES = {
+        "read_file": "files", "write_file": "files", "list_directory": "files",
+        "move_file": "files", "copy_file": "files", "delete_file": "files",
+        "glob_search": "files", "mkdir": "files",
+        "preview_organize": "files", "execute_organize": "files",
+        "create_note": "notes", "list_notes": "notes",
+        "search_notes": "notes", "delete_note": "notes",
+        "open_browser": "browser", "search_web": "browser",
+        "draft_email": "email", "open_email_client": "email", "list_drafts": "email",
+    }
+
+    def _tool_scope(self, tool_name: str) -> str:
+        return self._TOOL_SCOPES.get(tool_name, "other")
+
+    def new_conversation(self):
+        """Start a fresh conversation — saves the old one, resets state."""
         self.conversation_history = []
         self._tool_call_count = 0
         self._pending_state = None
         self._organize_plans.clear()
+        self._conversation_id = None
         logger.info("Agent conversation reset")
+
+    def reset(self):
+        self.new_conversation()

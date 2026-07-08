@@ -6,8 +6,12 @@ Reads stdin synchronously to avoid Windows ProactorEventLoop bugs.
 """
 
 import json
+import logging
 import sys
 from pathlib import Path
+
+logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+logger = logging.getLogger("notes")
 
 
 NOTES_DIR = Path.home() / ".desktop-companion" / "notes"

@@ -7,11 +7,15 @@ Reads stdin synchronously in a thread to avoid Windows ProactorEventLoop bugs.
 
 import fnmatch
 import json
+import logging
 import shutil
 import sys
 import threading
 import uuid
 from pathlib import Path
+
+logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+logger = logging.getLogger("filesystem")
 
 
 # --- Path alias resolution ---

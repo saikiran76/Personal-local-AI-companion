@@ -74,7 +74,29 @@ function ComposeEmailForm({ initialTo, initialSubject, initialBody, onDraft, onS
   const [to, setTo] = useState(initialTo || '');
   const [subject, setSubject] = useState(initialSubject || '');
   const [body, setBody] = useState(initialBody || '');
+  const [brief, setBrief] = useState('');
+  const [drafting, setDrafting] = useState(false);
   const [sending, setSending] = useState(false);
+
+  const handleLunaDraft = async () => {
+    if (!brief.trim()) return;
+    setDrafting(true);
+    try {
+      const res = await fetch(`${BACKEND_URL}/chat/draft`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brief: brief.trim(), to, subject }),
+      });
+      const data = await res.json();
+      if (data.body) {
+        setBody(data.body);
+      }
+    } catch {
+      setBody('Draft generation failed. Please write your message manually.');
+    } finally {
+      setDrafting(false);
+    }
+  };
 
   const handleDraft = async () => {
     setSending(true);
@@ -119,10 +141,34 @@ function ComposeEmailForm({ initialTo, initialSubject, initialBody, onDraft, onS
             onChange={(e) => setSubject(e.target.value)}
           />
         </div>
+        <div className="compose-field compose-brief-field">
+          <label>What should the email say?</label>
+          <div className="compose-brief-row">
+            <input
+              type="text"
+              placeholder="e.g. polite follow-up asking about the invoice"
+              value={brief}
+              onChange={(e) => setBrief(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  handleLunaDraft();
+                }
+              }}
+            />
+            <button
+              className="compose-btn compose-draft-btn"
+              disabled={drafting || !brief.trim()}
+              onClick={handleLunaDraft}
+            >
+              {drafting ? 'Writing...' : 'Luna draft it'}
+            </button>
+          </div>
+        </div>
         <div className="compose-field">
           <label>Body</label>
           <textarea
-            placeholder="Write your message..."
+            placeholder="Write your message, or use Luna draft it above..."
             rows={4}
             value={body}
             onChange={(e) => setBody(e.target.value)}
@@ -177,6 +223,8 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
   const [modelAdvisor, setModelAdvisor] = useState(null);
   const [pendingClarify, setPendingClarify] = useState(null);
   const [pendingConfirm, setPendingConfirm] = useState(null);
+  const [conversations, setConversations] = useState([]);
+  const [activeConversationId, setActiveConversationId] = useState(null);
   const pendingClarifyRef = useRef(null);
   const pendingConfirmRef = useRef(null);
   const messagesEndRef = useRef(null);
@@ -281,6 +329,45 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
     };
   }, []);
 
+  /* ---- Load conversation list from backend ---- */
+
+  const loadConversations = useCallback(async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/conversations`);
+      const data = await res.json();
+      setConversations(data.conversations || []);
+    } catch {
+      // Backend not available yet — silent fail
+    }
+  }, []);
+
+  useEffect(() => {
+    loadConversations();
+  }, [loadConversations]);
+
+  /* ---- Load messages for a conversation ---- */
+
+  const loadConversation = useCallback(async (convId) => {
+    if (isStreaming) return;
+    try {
+      const res = await fetch(`${BACKEND_URL}/conversations/${convId}`);
+      const data = await res.json();
+      if (data.messages) {
+        const mapped = data.messages.map((m, i) => ({
+          id: Date.now() + i,
+          role: m.role,
+          content: m.content,
+          toolCalls: m.role === 'tool_result' ? [{ name: m.tool_name || '', status: 'done', result: m.content }] : [],
+          timestamp: new Date(m.created_at),
+        }));
+        setMessages(mapped);
+        setActiveConversationId(convId);
+      }
+    } catch {
+      // silent
+    }
+  }, [isStreaming]);
+
   /* ---- Helpers to update a specific message by ID ---- */
 
   const updateMessage = (msgId, updater) => {
@@ -354,6 +441,7 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
 
       const body = { message };
       if (response) body.response = response;
+      if (activeConversationId) body.conversation_id = activeConversationId;
 
       const res = await fetch(`${BACKEND_URL}/chat`, {
         method: 'POST',
@@ -491,6 +579,7 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
               case 'done':
                 setIsThinking(false);
                 setActiveTool(null);
+                loadConversations();
                 break;
 
               case 'error':
@@ -554,18 +643,13 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
   };
 
   const handleComposeSend = async (slots) => {
-    const params = new URLSearchParams();
-    if (slots.to) params.set('to', slots.to);
-    if (slots.subject) params.set('subject', slots.subject);
-    if (slots.body) params.set('body', slots.body);
-    const mailtoUrl = `mailto:?${params.toString()}`;
     try {
       await fetch(`${BACKEND_URL}/tools/call`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           tool_name: 'open_email_client',
-          tool_args: { url: mailtoUrl },
+          tool_args: { to: slots.to, subject: slots.subject, body: slots.body },
         }),
       });
     } catch { /* mailto is best-effort */ }
@@ -681,7 +765,7 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
             <span className="sidebar-brand-name">{assistantName}</span>
             <span className="sidebar-brand-version">v0.1</span>
           </div>
-          <button className="sidebar-new-chat" onClick={() => setMessages([])}>
+          <button className="sidebar-new-chat" onClick={() => { setMessages([]); setActiveConversationId(null); }}>
             <span>+</span>
             <span>New chat</span>
           </button>
@@ -694,18 +778,33 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
         </div>
 
         <div className="sidebar-conversations">
-          <div className="sidebar-section-label">Today</div>
-          {hasMessages ? (
-            <div className="sidebar-conversation active">New conversation</div>
-          ) : (
+          {hasMessages && (
+            <>
+              <div className="sidebar-section-label">Current</div>
+              <div className="sidebar-conversation active">
+                {messages[0]?.content?.slice(0, 40) || 'New conversation'}
+              </div>
+            </>
+          )}
+          {conversations.length > 0 && (
+            <>
+              <div className="sidebar-section-label" style={{ marginTop: hasMessages ? 12 : 0 }}>Previous</div>
+              {conversations.map((conv) => (
+                <div
+                  key={conv.id}
+                  className={`sidebar-conversation ${activeConversationId === conv.id ? 'active' : ''}`}
+                  onClick={() => loadConversation(conv.id)}
+                >
+                  {conv.title || `Conversation ${conv.id}`}
+                </div>
+              ))}
+            </>
+          )}
+          {!hasMessages && conversations.length === 0 && (
             <div className="sidebar-conversation" style={{ opacity: 0.5 }}>
               No conversations yet
             </div>
           )}
-          <div className="sidebar-section-label" style={{ marginTop: 12 }}>Previous</div>
-          <div className="sidebar-conversation" style={{ opacity: 0.5 }}>
-            No previous chats
-          </div>
         </div>
 
         <div className="sidebar-footer">

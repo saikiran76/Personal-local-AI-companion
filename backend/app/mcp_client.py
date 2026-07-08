@@ -5,6 +5,7 @@ import json
 import logging
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 from dataclasses import dataclass, field
@@ -94,6 +95,16 @@ class DirectStdioTransport:
                 self._args[-1],
                 self._process.pid,
             )
+
+            # Start background thread to forward stderr → main logger
+            if self._process.stderr:
+                server_name = self._args[-1].split(".")[-2] if self._args else "unknown"
+                t = threading.Thread(
+                    target=self._forward_stderr,
+                    args=(self._process.stderr, server_name),
+                    daemon=True,
+                )
+                t.start()
         except Exception as e:
             logger.error("Failed to start MCP server %s: %s", self._args, e)
             raise
@@ -164,6 +175,20 @@ class DirectStdioTransport:
                 except Exception:
                     pass
             self._process = None
+
+    @staticmethod
+    def _forward_stderr(stderr_pipe, server_name: str):
+        """Read stderr lines from subprocess and forward to main logger."""
+        sub_logger = logging.getLogger(f"mcp.{server_name}")
+        try:
+            for raw_line in iter(stderr_pipe.readline, b""):
+                if not raw_line:
+                    break
+                line = raw_line.decode("utf-8", errors="replace").rstrip()
+                if line:
+                    sub_logger.info("[subprocess] %s", line)
+        except Exception:
+            pass
 
 
 class MCPClientManager:

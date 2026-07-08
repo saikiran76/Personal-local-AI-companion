@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, Request, UploadFile, File
+from .database import db
 from sse_starlette.sse import EventSourceResponse
 
 from .model_loader import (
@@ -230,18 +231,26 @@ async def chat(request: Request):
     """
     Streaming chat endpoint. Streams AgentEvents via SSE.
 
-    Request:  { "message": "...", "response": "..." (optional, for clarify/confirm resume) }
+    Request:  { "message": "...", "response": "..." (optional), "conversation_id": int (optional) }
     Events:   token, clear, thinking, tool_call, tool_result, done, error, clarify, confirm, compose_form
     """
     body = await request.json()
     user_message = body.get("message", "")
     user_response = body.get("response")
+    conversation_id = body.get("conversation_id")
 
     if not user_message:
         return {"error": "No message provided"}
 
     if _agent is None:
         return {"error": "Agent not initialized. Wait for backend_ready event."}
+
+    # If resuming an existing conversation, load its history into the agent
+    if conversation_id and _agent._conversation_id != conversation_id:
+        _agent._conversation_id = conversation_id
+        messages = db.get_recent_messages(conversation_id, limit=20)
+        _agent.conversation_history = [{"role": m["role"], "content": m["content"]} for m in messages]
+        logger.info("Resumed conversation %d with %d messages", conversation_id, len(messages))
 
     async def stream_response():
         try:
@@ -347,6 +356,74 @@ async def tools_call(request: Request):
         return {"result": result}
     except Exception as e:
         logger.error("Tool call failed: %s", e)
+        return {"error": str(e)}
+
+
+@router.post("/chat/draft")
+async def chat_draft(request: Request):
+    """
+    Generate email body text from a brief description.
+    Request: { "brief": "polite follow-up asking about the invoice", "to": "...", "subject": "..." }
+    Returns: { "body": "generated text" }
+    """
+    if _model_loader is None or not _model_loader.is_ready:
+        return {"error": "Model not ready"}
+
+    body = await request.json()
+    brief = body.get("brief", "")
+    to = body.get("to", "")
+    subject = body.get("subject", "")
+
+    if not brief:
+        return {"error": "No brief provided"}
+
+    # Build a focused prompt for email body generation
+    context_parts = []
+    if to:
+        context_parts.append(f"Recipient: {to}")
+    if subject:
+        context_parts.append(f"Subject: {subject}")
+
+    context = "\n".join(context_parts) if context_parts else ""
+    prompt = (
+        f"Write a short professional email body based on this brief: {brief}\n\n"
+        f"Rules:\n"
+        f"- 3-5 sentences max, no paragraphs\n"
+        f"- Professional but warm tone\n"
+        f"- Do NOT include a subject line or greeting — just the body\n"
+        f"- Do NOT fabricate details not in the brief\n"
+    )
+    if context:
+        prompt += f"\nContext:\n{context}\n"
+
+    messages = [
+        {"role": "system", "content": "You are a professional email writing assistant. Write only the email body text — no subject line, no salutation, no signature."},
+        {"role": "user", "content": prompt},
+    ]
+
+    try:
+        full_response = ""
+        async for token in _model_loader.generate(messages=messages, max_tokens=150):
+            if token.startswith("{") and "finish_reason" in token:
+                continue
+            full_response += token
+
+        # Clean up the response — strip any accidental subject lines or greetings
+        lines = full_response.strip().split("\n")
+        # Skip lines that look like subject lines or greetings
+        cleaned = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.lower().startswith("subject:") or stripped.lower().startswith("dear"):
+                continue
+            if stripped.lower().startswith("hi ") or stripped.lower().startswith("hello"):
+                continue
+            cleaned.append(line)
+
+        result_body = "\n".join(cleaned).strip()
+        return {"body": result_body}
+    except Exception as e:
+        logger.error("Draft generation failed: %s", e)
         return {"error": str(e)}
 
 
@@ -581,3 +658,82 @@ async def shutdown():
     if _model_loader:
         _model_loader.unload()
     return {"status": "shutting_down"}
+
+
+# ------------------------------------------------------------------
+# Database API — conversations, activity, memories, permissions
+# ------------------------------------------------------------------
+
+@router.get("/conversations")
+async def list_conversations(limit: int = 20):
+    return {"conversations": db.list_conversations(limit)}
+
+
+@router.get("/conversations/{conv_id}/messages")
+async def get_messages(conv_id: int, limit: int = 50):
+    return {"messages": db.get_messages(conv_id, limit)}
+
+
+@router.get("/conversations/{conv_id}")
+async def get_conversation(conv_id: int):
+    """Return conversation metadata + all messages (for resuming)."""
+    messages = db.get_messages(conv_id, limit=100)
+    convos = db.list_conversations(limit=100)
+    convo = next((c for c in convos if c["id"] == conv_id), None)
+    if not convo:
+        return {"error": "Conversation not found"}
+    return {"conversation": convo, "messages": messages}
+
+
+@router.delete("/conversations/{conv_id}")
+async def delete_conversation(conv_id: int):
+    db.delete_conversation(conv_id)
+    return {"status": "deleted"}
+
+
+@router.get("/activity")
+async def get_activity(limit: int = 50):
+    return {"activity": db.get_activity(limit)}
+
+
+@router.get("/memories")
+async def list_memories(category: str = None, limit: int = 50):
+    return {"memories": db.get_memories(category, limit)}
+
+
+@router.post("/memories")
+async def add_memory(request: Request):
+    body = await request.json()
+    category = body.get("category", "fact")
+    content = body.get("content", "")
+    if not content:
+        return {"error": "No content provided"}
+    mem_id = db.add_memory(category, content)
+    return {"id": mem_id, "status": "saved"}
+
+
+@router.get("/memories/search")
+async def search_memories(q: str, limit: int = 10):
+    return {"memories": db.search_memories(q, limit)}
+
+
+@router.delete("/memories/{mem_id}")
+async def delete_memory(mem_id: int):
+    db.delete_memory(mem_id)
+    return {"status": "deleted"}
+
+
+@router.get("/permissions")
+async def list_permissions():
+    return {"permissions": db.list_permissions()}
+
+
+@router.post("/permissions")
+async def set_permission(request: Request):
+    body = await request.json()
+    scope = body.get("scope", "")
+    granted = body.get("granted", False)
+    if not scope:
+        return {"error": "No scope provided"}
+    db.set_permission(scope, granted)
+    return {"status": "set", "scope": scope, "granted": granted}

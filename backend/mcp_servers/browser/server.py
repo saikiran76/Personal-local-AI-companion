@@ -6,8 +6,12 @@ Reads stdin synchronously to avoid Windows ProactorEventLoop bugs.
 """
 
 import json
+import logging
 import sys
 import webbrowser
+
+logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+logger = logging.getLogger("browser")
 
 
 def handle_request(request: dict) -> dict:

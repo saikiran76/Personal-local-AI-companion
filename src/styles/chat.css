@@ -1259,6 +1259,64 @@
   border-color: var(--color-primary);
 }
 
+.compose-brief-field {
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  border-radius: var(--rounded-sm);
+  padding: 8px 10px;
+  margin-bottom: 4px;
+}
+
+.theme-dark .compose-brief-field {
+  background: #0c1929;
+  border-color: #1e3a5f;
+}
+
+.compose-brief-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.compose-brief-row input {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--rounded-sm);
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.compose-brief-row input:focus {
+  border-color: #0ea5e9;
+}
+
+.compose-draft-btn {
+  background: #0ea5e9;
+  color: white;
+  padding: 6px 12px;
+  border: none;
+  border-radius: var(--rounded-sm);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+
+.compose-draft-btn:hover {
+  background: #0284c7;
+}
+
+.compose-draft-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .compose-actions {
   display: flex;
   gap: var(--spacing-xs);

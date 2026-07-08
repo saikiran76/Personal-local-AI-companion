@@ -17,6 +17,7 @@ from app.config import load_config
 from app.model_loader import ModelLoader
 from app.agent import AgentOrchestrator
 from app.routes import router
+from app.database import db
 
 # --- Monkey-patch for Python 3.13 Windows bug ---
 # _ProactorReadPipeTransport._force_close() references self._empty_waiter
@@ -68,7 +69,8 @@ agent: AgentOrchestrator | None = None
 
 @app.on_event("startup")
 async def startup():
-    """On startup: load config, signal Electron we're alive."""
+    """On startup: init database, load config, signal Electron we're alive."""
+    db.init()
     config = load_config()
     logger.info("Config loaded: %s", config)
 
@@ -77,6 +79,7 @@ async def startup():
 async def shutdown():
     logger.info("Shutting down backend...")
     model_loader.unload()
+    db.close()
 
 
 def main():

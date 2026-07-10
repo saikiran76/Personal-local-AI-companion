@@ -2,3 +2,9 @@ node_modules
 dist/
 __pycache__/
 .venv/
+
+build/
+release/
+backend/.venv-build/
+*.exe
+*.pkg

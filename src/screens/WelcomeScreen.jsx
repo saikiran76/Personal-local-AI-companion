@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useState, Suspense } from 'react';
+import { ShaderGradient, ShaderGradientCanvas } from '@shadergradient/react';
 
 const STEPS = [
   { key: 'intro', label: 'Welcome' },
@@ -10,20 +11,25 @@ const STEPS = [
 
 const MODEL_OPTIONS = [
   {
-    id: 'auto',
-    label: 'Auto-download recommended model',
-    desc: "We'll set up a lightweight model (Phi-3 Mini) automatically.",
-    badge: 'Recommended',
+    id: 'bring',
+    label: 'Bring your own model (.GGUF)',
+    desc: 'Use a GGUF model file you already have on disk.',
+    badge: null,
+    available: true,
   },
   {
-    id: 'bring',
-    label: 'Bring your own model',
-    desc: "Use a GGUF or ONNX model file you've already downloaded.",
+    id: 'auto',
+    label: 'Auto-download recommended model',
+    desc: "We'll set up a lightweight model automatically.",
+    badge: 'Coming Soon',
+    available: false,
   },
   {
     id: 'hybrid',
     label: 'Hybrid (local + cloud fallback)',
     desc: 'Run locally by default, with optional cloud fallback for heavy tasks.',
+    badge: 'Coming Soon',
+    available: false,
   },
 ];
 
@@ -31,6 +37,61 @@ const DATA_OPTIONS = [
   { id: 'default', label: 'Default location', desc: '~/.desktop-companion/ — standard user data directory.' },
   { id: 'custom', label: 'Custom location', desc: 'Choose a specific folder on your device.' },
 ];
+
+function GradientBackground() {
+  return (
+    <div className="shader-gradient-bg">
+      <ShaderGradientCanvas
+        style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }}
+        pixelDensity={1}
+      >
+        <Suspense fallback={null}>
+          <ShaderGradient
+            animate="on"
+            axesHelper="off"
+            brightness={0.8}
+            cAzimuthAngle={270}
+            cDistance={0.5}
+            cPolarAngle={180}
+            cameraZoom={15.1}
+            color1="#73bfc4"
+            color2="#ff810a"
+            color3="#8da0ce"
+            destination="onCanvas"
+            embedMode="off"
+            envPreset="city"
+            format="gif"
+            fov={45}
+            frameRate={10}
+            gizmoHelper="hide"
+            grain="on"
+            lightType="env"
+            pixelDensity={1}
+            positionX={-0.1}
+            positionY={0}
+            positionZ={0}
+            range="disabled"
+            rangeEnd={40}
+            rangeStart={0}
+            reflection={0.4}
+            rotationX={0}
+            rotationY={130}
+            rotationZ={70}
+            shader="defaults"
+            type="sphere"
+            uAmplitude={3.2}
+            uDensity={0.8}
+            uFrequency={5.5}
+            uSpeed={0.3}
+            uStrength={0.3}
+            uTime={0}
+            wireframe={false}
+          />
+        </Suspense>
+      </ShaderGradientCanvas>
+    </div>
+  );
+}
 
 function ProgressDots({ active }) {
   return (
@@ -47,7 +108,7 @@ function ProgressDots({ active }) {
 
 export default function WelcomeScreen({ onComplete }) {
   const [step, setStep] = useState(0);
-  const [model, setModel] = useState('auto');
+  const [model, setModel] = useState('bring');
   const [dataLoc, setDataLoc] = useState('default');
 
   const next = () => setStep((s) => Math.min(s + 1, STEPS.length - 1));
@@ -56,11 +117,11 @@ export default function WelcomeScreen({ onComplete }) {
   if (step === 0) {
     return (
       <div className="screen">
-        <div className="mesh-gradient-bg" />
+        <GradientBackground />
         <div className="screen-content">
           <div className="welcome-logo">&#x2728;</div>
           <p className="welcome-eyebrow">introducing</p>
-          <h1 className="welcome-title">Desktop Companion</h1>
+          <h1 className="welcome-title">Luna</h1>
           <p className="welcome-subtitle">
             Your personal AI assistant that runs entirely on your device.
             Private, fast, and always available — no cloud required.
@@ -78,7 +139,7 @@ export default function WelcomeScreen({ onComplete }) {
   if (step === 1) {
     return (
       <div className="screen">
-        <div className="mesh-gradient-bg" />
+        <GradientBackground />
         <div className="screen-content">
           <p className="welcome-eyebrow">capabilities</p>
           <h2 className="step-title">What I can do for you</h2>
@@ -110,7 +171,7 @@ export default function WelcomeScreen({ onComplete }) {
   if (step === 2) {
     return (
       <div className="screen">
-        <div className="mesh-gradient-bg" />
+        <GradientBackground />
         <div className="screen-content">
           <p className="welcome-eyebrow">configuration</p>
           <h2 className="step-title">Choose your AI model</h2>
@@ -119,15 +180,15 @@ export default function WelcomeScreen({ onComplete }) {
             {MODEL_OPTIONS.map((opt) => (
               <div
                 key={opt.id}
-                className={`option-item ${model === opt.id ? 'selected' : ''}`}
-                onClick={() => setModel(opt.id)}
+                className={`option-item ${model === opt.id ? 'selected' : ''} ${!opt.available ? 'option-disabled' : ''}`}
+                onClick={() => opt.available && setModel(opt.id)}
               >
                 <div className="option-radio" />
                 <div className="option-content">
                   <div className="option-label">{opt.label}</div>
                   <div className="option-desc">{opt.desc}</div>
                 </div>
-                {opt.badge && <span className="option-badge">{opt.badge}</span>}
+                {opt.badge && <span className="option-badge option-badge-soon">{opt.badge}</span>}
               </div>
             ))}
           </div>
@@ -144,7 +205,7 @@ export default function WelcomeScreen({ onComplete }) {
   if (step === 3) {
     return (
       <div className="screen">
-        <div className="mesh-gradient-bg" />
+        <GradientBackground />
         <div className="screen-content">
           <p className="welcome-eyebrow">configuration</p>
           <h2 className="step-title">Where should I store your data?</h2>
@@ -181,7 +242,7 @@ export default function WelcomeScreen({ onComplete }) {
   // Step 4: Ready
   return (
     <div className="screen">
-      <div className="mesh-gradient-bg" />
+      <GradientBackground />
       <div className="screen-content">
         <div className="welcome-logo" style={{ fontSize: 24 }}>&#x2714;</div>
         <h2 className="step-title">You're all set</h2>
@@ -192,9 +253,9 @@ export default function WelcomeScreen({ onComplete }) {
             <div style={{ textAlign: 'left' }}>
               <div className="feature-label">Model</div>
               <div className="feature-desc">
-                {model === 'auto' && 'Auto-downloaded (Phi-3 Mini)'}
-                {model === 'bring' && 'Bring your own model'}
-                {model === 'hybrid' && 'Hybrid (local + cloud)'}
+                {model === 'bring' && 'Bring your own model (.GGUF)'}
+                {model === 'auto' && 'Auto-downloaded (coming soon)'}
+                {model === 'hybrid' && 'Hybrid (coming soon)'}
               </div>
             </div>
           </div>

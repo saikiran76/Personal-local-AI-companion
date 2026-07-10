@@ -47,7 +47,7 @@
   border: none;
   background: transparent;
   color: var(--color-body);
-  border-radius: var(--radius-sm);
+  border-radius: var(--rounded-sm);
   cursor: pointer;
   position: relative;
   transition: all 0.15s ease;
@@ -67,6 +67,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  color: inherit;
+  flex-shrink: 0;
 }
 
 .sidebar-nav-label {
@@ -80,7 +82,7 @@
   width: 8px;
   height: 8px;
   background: var(--color-warning);
-  border-radius: var(--radius-full);
+  border-radius: var(--rounded-full);
   font-size: 0;
   border: 1.5px solid var(--color-canvas);
 }
@@ -102,7 +104,7 @@
 .sidebar-nav-status-dot {
   width: 6px;
   height: 6px;
-  border-radius: var(--radius-full);
+  border-radius: var(--rounded-full);
   background: var(--color-faint);
 }
 
@@ -125,7 +127,7 @@
   justify-content: center;
   cursor: pointer;
   padding: 4px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--rounded-sm);
   transition: background 0.15s ease;
 }
 
@@ -136,7 +138,7 @@
 .sidebar-nav-avatar {
   width: 28px;
   height: 28px;
-  border-radius: var(--radius-full);
+  border-radius: var(--rounded-full);
   background: var(--color-ink);
   color: var(--color-on-primary);
   display: flex;

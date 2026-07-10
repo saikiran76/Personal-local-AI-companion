@@ -41,6 +41,14 @@
   pointer-events: none;
 }
 
+.shader-gradient-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
 .screen-content {
   position: relative;
   z-index: 1;
@@ -200,6 +208,12 @@
   border-color: var(--color-ink);
   box-shadow: 0 0 0 1px var(--color-ink);
 }
+.option-item.option-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.option-item.option-disabled:hover { border-color: var(--color-hairline); }
 
 .option-radio {
   width: 18px;
@@ -246,6 +260,11 @@
   border-radius: var(--rounded-full);
   padding: 2px 8px;
   flex-shrink: 0;
+}
+.option-badge-soon {
+  color: var(--color-faint);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--color-hairline);
 }
 
 /* --- Theme Preview Grid --- */

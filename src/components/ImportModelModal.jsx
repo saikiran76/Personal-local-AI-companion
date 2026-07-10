@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback } from 'react';
+import { X, CheckCircle, File, Upload, Folder } from 'lucide-react';
 
 const BACKEND_URL = 'http://127.0.0.1:8765';
 
@@ -178,9 +179,7 @@ export default function ImportModelModal({ onClose, onImported }) {
         <div className="import-modal-header">
           <h3>Import Model</h3>
           <button className="import-modal-close" onClick={onClose}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
+            <X size={16} strokeWidth={2} />
           </button>
         </div>
 
@@ -188,9 +187,7 @@ export default function ImportModelModal({ onClose, onImported }) {
           {imported ? (
             <div className="import-success">
               <div className="import-success-icon">
-                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
-                </svg>
+                <CheckCircle size={32} strokeWidth={2} />
               </div>
               <p className="import-success-text">Model imported successfully</p>
               <p className="import-success-detail">{selectedFile?.name}</p>
@@ -219,9 +216,7 @@ export default function ImportModelModal({ onClose, onImported }) {
                 {selectedFile ? (
                   <div className="import-file-info">
                     <div className="import-file-icon">
-                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>
-                      </svg>
+                      <File size={24} strokeWidth={2} />
                     </div>
                     <div className="import-file-name">{selectedFile.name}</div>
                     <div className="import-file-size">{formatSize(Math.round(selectedFile.size / (1024 * 1024)))}</div>
@@ -235,9 +230,7 @@ export default function ImportModelModal({ onClose, onImported }) {
                 ) : (
                   <div className="import-dropzone-content">
                     <div className="import-dropzone-icon">
-                      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
-                      </svg>
+                      <Upload size={32} strokeWidth={1.5} />
                     </div>
                     <p className="import-dropzone-title">
                       {isDragging ? 'Drop your model here' : 'Drag & drop a .gguf model'}
@@ -269,9 +262,7 @@ export default function ImportModelModal({ onClose, onImported }) {
                   className="import-btn import-btn-native"
                   onClick={handleSelectFile}
                 >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-                  </svg>
+                  <Folder size={14} strokeWidth={2} />
                   Browse files
                 </button>
                 <button

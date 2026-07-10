@@ -30,9 +30,11 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 try:
     from llama_cpp import Llama as LlamaModel
+    from llama_cpp import LlamaGrammar
     LLAMA_CPP_AVAILABLE = True
 except ImportError:
     LLAMA_CPP_AVAILABLE = False
+    LlamaGrammar = None
     logger.info(
         "llama-cpp-python not installed — using mock mode. "
         "Install with: uv pip install llama-cpp-python"
@@ -43,6 +45,63 @@ try:
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
+
+
+# ---------------------------------------------------------------------------
+# GBNF Grammar for structured tool calls
+# ---------------------------------------------------------------------------
+def build_tool_call_grammar(mcp_tools: list[dict]) -> "LlamaGrammar | None":
+    """Build a GBNF grammar that forces the LLM to output valid JSON.
+
+    Uses a flat oneOf schema — each tool gets its own concrete branch:
+      {"tool": {"const": "tool_name"}, "arguments": {tool's inputSchema}}
+
+    Plus a final_answer branch for when the model wants to respond in prose.
+
+    Returns None if grammar construction fails or llama-cpp-python is unavailable.
+    """
+    if not LLAMA_CPP_AVAILABLE or LlamaGrammar is None:
+        return None
+    if not mcp_tools:
+        return None
+
+    # Build one branch per tool — flat, no nesting ambiguity
+    tool_branches = []
+    for tool in mcp_tools:
+        name = tool["name"]
+        input_schema = tool.get("inputSchema", {})
+        if not input_schema:
+            input_schema = {"type": "object"}
+
+        branch = {
+            "type": "object",
+            "properties": {
+                "tool": {"const": name},
+                "arguments": input_schema,
+            },
+            "required": ["tool", "arguments"],
+        }
+        tool_branches.append(branch)
+
+    # Add final_answer branch
+    final_answer_branch = {
+        "type": "object",
+        "properties": {
+            "final_answer": {"type": "string"},
+        },
+        "required": ["final_answer"],
+    }
+
+    schema = {"oneOf": tool_branches + [final_answer_branch]}
+
+    try:
+        import json as _json
+        grammar = LlamaGrammar.from_json_schema(_json.dumps(schema), verbose=False)
+        logger.info("Built GBNF grammar for %d tools (flat oneOf)", len(tool_branches))
+        return grammar
+    except Exception as e:
+        logger.warning("Failed to build GBNF grammar: %s", e)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +441,7 @@ class ModelLoader:
         max_tokens: int = 1024,
         temperature: float = 0.7,
         stop: list[str] | None = None,
+        grammar=None,
     ) -> AsyncIterator[str]:
         """Stream tokens from the loaded GGUF model."""
         if not self.is_ready:
@@ -389,7 +449,7 @@ class ModelLoader:
             return
 
         if LLAMA_CPP_AVAILABLE and self._model is not None:
-            async for token in self._generate_stream(messages, max_tokens, temperature, stop):
+            async for token in self._generate_stream(messages, max_tokens, temperature, stop, grammar):
                 yield token
         else:
             async for token in self._generate_mock():
@@ -605,6 +665,7 @@ class ModelLoader:
         max_tokens: int,
         temperature: float,
         stop: list[str] | None,
+        grammar=None,
     ) -> AsyncIterator[str]:
         """Stream tokens from llama-cpp-python without blocking the event loop."""
         import queue
@@ -614,13 +675,17 @@ class ModelLoader:
         def _generate_in_thread():
             """Run in executor thread — yields tokens into a queue."""
             try:
-                stream = self._model.create_chat_completion(
+                kwargs = dict(
                     messages=messages,
                     max_tokens=max_tokens,
                     temperature=max(temperature, 0.01),
                     stop=stop or [],
                     stream=True,
                 )
+                if grammar is not None:
+                    kwargs["grammar"] = grammar
+
+                stream = self._model.create_chat_completion(**kwargs)
                 for chunk in stream:
                     delta = chunk.get("choices", [{}])[0].get("delta", {})
                     token = delta.get("content", "")

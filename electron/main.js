@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, screen, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, dialog, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn, execSync } = require('child_process');
@@ -90,25 +90,74 @@ async function startPythonBackend() {
     await new Promise((r) => setTimeout(r, 500));
   }
 
-  const backendDir = path.join(__dirname, '..', 'backend');
   const isDev = !app.isPackaged;
 
-  const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
+  if (isDev) {
+    // --- Dev mode: spawn python -m uvicorn from the backend directory ---
+    const backendDir = path.join(__dirname, '..', 'backend');
+    const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
 
-  console.log('[main] Starting Python backend...');
+    console.log('[main] Starting Python backend (dev mode)...');
 
-  pythonProcess = spawn(pythonCmd, ['-m', 'uvicorn', 'server:app', '--host', '127.0.0.1', '--port', String(BACKEND_PORT), '--log-level', 'info'], {
-    cwd: backendDir,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: {
-      ...process.env,
-      BACKEND_PORT: String(BACKEND_PORT),
-    },
-    // On Windows, create a process group so we can kill the tree
-    detached: process.platform !== 'win32',
-  });
+    pythonProcess = spawn(pythonCmd, ['-m', 'uvicorn', 'server:app', '--host', '127.0.0.1', '--port', String(BACKEND_PORT), '--log-level', 'info'], {
+      cwd: backendDir,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        BACKEND_PORT: String(BACKEND_PORT),
+      },
+      // On Windows, create a process group so we can kill the tree
+      detached: process.platform !== 'win32',
+    });
+  } else {
+    // --- Production mode: spawn the frozen .exe ---
+    // The exe is located next to the Electron app's resources directory
+    const exeName = process.platform === 'win32' ? 'backend.exe' : 'backend';
+    const exePath = path.join(path.dirname(process.execPath), 'resources', exeName);
+
+    // Fallback: check if exe is in the app's asar unpacked directory
+    const fallbackPath = path.join(path.dirname(process.execPath), exeName);
+
+    let resolvedPath = exePath;
+    if (!fs.existsSync(exePath)) {
+      if (fs.existsSync(fallbackPath)) {
+        resolvedPath = fallbackPath;
+      } else {
+        console.error(`[main] Frozen backend not found at ${exePath} or ${fallbackPath}`);
+        console.error('[main] Falling back to dev mode spawn');
+        // Recursive call won't infinite loop because isDev will be true in dev
+        const backendDir = path.join(__dirname, '..', 'backend');
+        const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
+        pythonProcess = spawn(pythonCmd, ['-m', 'uvicorn', 'server:app', '--host', '127.0.0.1', '--port', String(BACKEND_PORT), '--log-level', 'info'], {
+          cwd: backendDir,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, BACKEND_PORT: String(BACKEND_PORT) },
+          detached: process.platform !== 'win32',
+        });
+        console.log(`[main] Python backend PID (fallback): ${pythonProcess.pid}`);
+        _attachBackendListeners();
+        return;
+      }
+    }
+
+    console.log(`[main] Starting Python backend (production): ${resolvedPath}`);
+
+    pythonProcess = spawn(resolvedPath, [], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        BACKEND_PORT: String(BACKEND_PORT),
+      },
+      detached: process.platform !== 'win32',
+    });
+  }
 
   console.log(`[main] Python backend PID: ${pythonProcess.pid}`);
+  _attachBackendListeners();
+}
+
+function _attachBackendListeners() {
+  if (!pythonProcess) return;
 
   pythonProcess.stdout?.on('data', (data) => {
     const msg = data.toString().trim();
@@ -277,6 +326,36 @@ ipcMain.handle('model:import', async (_event, filePath) => {
   });
 
   return { success: true, selected };
+});
+
+// Open .ics calendar file via OS calendar app (Outlook, Windows Calendar)
+// Validates path is within ~/.desktop-companion/calendar/ before opening
+ipcMain.handle('open-calendar-file', async (_event, icsPath) => {
+  const { shell } = require('electron');
+  const calendarDir = path.join(app.getPath('home'), '.desktop-companion', 'calendar');
+
+  console.log('[calendar] open-calendar-file called with:', icsPath);
+
+  // Security: only allow opening files from the calendar directory
+  const resolvedPath = path.resolve(icsPath);
+  if (!resolvedPath.startsWith(calendarDir)) {
+    console.log('[calendar] Access denied: path outside calendar dir:', resolvedPath);
+    return { success: false, error: 'Access denied: path outside calendar directory' };
+  }
+
+  if (!fs.existsSync(resolvedPath)) {
+    console.log('[calendar] File not found:', resolvedPath);
+    return { success: false, error: 'Calendar file not found' };
+  }
+
+  try {
+    const result = await shell.openPath(resolvedPath);
+    console.log('[calendar] shell.openPath result:', result || '(empty = success)');
+    return { success: true, openResult: result };
+  } catch (err) {
+    console.log('[calendar] shell.openPath error:', err.message);
+    return { success: false, error: err.message };
+  }
 });
 
 app.whenReady().then(async () => {

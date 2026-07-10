@@ -119,7 +119,7 @@ export default function App() {
   }
 
   const userName = configData?.userName || 'User';
-  const assistantName = configData?.assistantName || 'Companion';
+  const assistantName = configData?.assistantName || 'Luna';
 
   const renderScreen = () => {
     switch (activeScreen) {

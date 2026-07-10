@@ -16,4 +16,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
     status: () => ipcRenderer.invoke('backend:status'),
   },
   importModel: () => ipcRenderer.invoke('model:import'),
+  openCalendarFile: (icsPath) => ipcRenderer.invoke('open-calendar-file', icsPath),
 });

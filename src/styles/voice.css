@@ -1,0 +1,107 @@
+/* Voice UI styles — mic button, recording state, TTS indicator */
+
+/* Morphing mic/send button */
+.chat-mic-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--rounded-full, 9999px);
+  border: none;
+  background: var(--color-primary, #171717);
+  color: var(--color-on-primary, #ffffff);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+
+.chat-mic-btn:hover:not(:disabled) {
+  background: var(--color-ink, #171717);
+  transform: scale(1.05);
+}
+
+.chat-mic-btn:active:not(:disabled) {
+  transform: scale(0.95);
+}
+
+.chat-mic-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Recording state — pulsing red */
+.chat-mic-btn.recording {
+  background: var(--color-error, #ee0000);
+  animation: mic-pulse 1s ease-in-out infinite;
+}
+
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(238, 0, 0, 0.4); }
+  50% { box-shadow: 0 0 0 8px rgba(238, 0, 0, 0); }
+}
+
+/* Transcribing state — spinner */
+.chat-mic-btn.transcribing {
+  background: var(--color-muted, #8f8f8f);
+  cursor: wait;
+}
+
+.mic-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  animation: mic-spin 0.6s linear infinite;
+}
+
+@keyframes mic-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* TTS audio playing indicator — subtle glow on assistant messages */
+.message-audio-playing {
+  border-left: 2px solid var(--color-link, #0070f3);
+}
+
+/* Recording indicator bar */
+.voice-recording-bar,
+.voice-transcribing-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs, 8px);
+  padding: var(--spacing-xxs, 4px) var(--spacing-sm, 12px);
+  font-size: 12px;
+  color: var(--color-body, #4d4d4d);
+  border-top: 1px solid var(--color-hairline, #ebebeb);
+}
+
+.voice-recording-bar {
+  background: rgba(238, 0, 0, 0.05);
+  color: var(--color-error, #ee0000);
+}
+
+.voice-transcribing-bar {
+  background: rgba(0, 112, 243, 0.05);
+  color: var(--color-link, #0070f3);
+}
+
+.voice-recording-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-error, #ee0000);
+  animation: mic-pulse-dot 1s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+@keyframes mic-pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.voice-transcribing-bar .mic-spinner {
+  border-color: rgba(0, 112, 243, 0.3);
+  border-top-color: var(--color-link, #0070f3);
+}

@@ -2,3 +2,8 @@
 .venv
 *.env
 __pycache__/
+dist/
+build/
+.venv-build/
+*.exe
+*.pkg

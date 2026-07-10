@@ -23,7 +23,24 @@ class MCPServerConfig:
 
 
 def _get_default_server_configs() -> list[MCPServerConfig]:
-    """Build default MCP server configs using the venv Python."""
+    """Build default MCP server configs.
+
+    In frozen (PyInstaller) mode, each MCP server is spawned via the same
+    frozen exe with --mcp-server <name>. In dev mode, each is spawned via
+    the venv Python with -m mcp_servers.<name>.server.
+    """
+    if getattr(sys, 'frozen', False):
+        # Frozen exe — use ourselves as the MCP server spawner
+        exe = sys.executable
+        return [
+            MCPServerConfig(name="filesystem", command=exe, args=["--mcp-server", "filesystem"]),
+            MCPServerConfig(name="notes", command=exe, args=["--mcp-server", "notes"]),
+            MCPServerConfig(name="browser", command=exe, args=["--mcp-server", "browser"]),
+            MCPServerConfig(name="email", command=exe, args=["--mcp-server", "email"]),
+            MCPServerConfig(name="reminders", command=exe, args=["--mcp-server", "reminders"]),
+        ]
+
+    # Dev mode — use venv Python
     backend_dir = Path(__file__).resolve().parent.parent
     python = str(backend_dir / ".venv" / "Scripts" / "python.exe")
     if sys.platform != "win32":
@@ -49,6 +66,11 @@ def _get_default_server_configs() -> list[MCPServerConfig]:
             name="email",
             command=python,
             args=["-m", "mcp_servers.email.server"],
+        ),
+        MCPServerConfig(
+            name="reminders",
+            command=python,
+            args=["-m", "mcp_servers.reminders.server"],
         ),
     ]
 
@@ -295,7 +317,9 @@ class MCPClientManager:
         lines.append(
             "\nTo use a tool, respond with a JSON block on its own line:\n"
             '  {"tool": "tool_name", "arguments": {"param": "value"}}\n'
-            "Only use tools when they are needed to fulfill the request."
+            "When you can answer from your own knowledge, respond with:\n"
+            '  {"final_answer": "your answer here"}\n'
+            "Always try to use a tool first. Only use final_answer if you are certain you know the answer."
         )
         return "\n".join(lines)
 
@@ -329,13 +353,32 @@ class MCPClientManager:
         # Extract text content from result
         result = response.get("result", {})
         content_parts = []
+        metadata = {}
         for item in result.get("content", []):
             if isinstance(item, dict) and "text" in item:
-                content_parts.append(item["text"])
+                text = item["text"]
+                content_parts.append(text)
+                # Check for structured metadata (e.g., ics_path)
+                try:
+                    parsed = json_mod.loads(text)
+                    if isinstance(parsed, dict):
+                        if "ics_path" in parsed:
+                            metadata["ics_path"] = parsed["ics_path"]
+                        # Merge the parsed dict into metadata for multi-part responses
+                        for k, v in parsed.items():
+                            if k not in metadata:
+                                metadata[k] = v
+                except (json_mod.JSONDecodeError, TypeError):
+                    pass
             else:
                 content_parts.append(str(item))
 
-        return "\n".join(content_parts) if content_parts else json_mod.dumps({"success": True})
+        # If metadata was found (e.g., ics_path), return it as a single merged object
+        if metadata:
+            return json_mod.dumps(metadata)
+
+        text_result = "\n".join(content_parts) if content_parts else json_mod.dumps({"success": True})
+        return text_result
 
     async def disconnect_all(self):
         """Kill all MCP server subprocesses."""

@@ -151,11 +151,14 @@ def handle_request(request: dict) -> dict:
 
 def main():
     """Run the MCP server over stdio — synchronous reads."""
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
+    while True:
         try:
+            line = sys.stdin.readline()
+            if not line:
+                break
+            line = line.strip()
+            if not line:
+                continue
             request = json.loads(line)
             response = handle_request(request)
             sys.stdout.write(json.dumps(response) + "\n")

@@ -51,7 +51,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("backend")
 
-app = FastAPI(title="Desktop Companion Backend", version="0.1.0")
+app = FastAPI(title="Luna Backend", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -83,16 +83,54 @@ async def shutdown():
 
 
 def main():
+    """Run the FastAPI server on a fixed port, or serve as an MCP server subprocess."""
+    # --- MCP server sub-command mode ---
+    if "--mcp-server" in sys.argv:
+        idx = sys.argv.index("--mcp-server")
+        server_name = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else None
+        if server_name:
+            _run_mcp_server(server_name)
+            return
+
     """Run the FastAPI server on a fixed port."""
     port = int(os.environ.get("BACKEND_PORT", 8765))
     logger.info("Starting backend on port %d", port)
     uvicorn.run(
-        "server:app",
+        app,
         host="127.0.0.1",
         port=port,
         log_level="info",
         access_log=False,
     )
+
+
+# --- MCP server sub-command registry ---
+# Maps server names to their module paths for import.
+_MCP_SERVERS = {
+    "filesystem": "mcp_servers.filesystem.server",
+    "notes": "mcp_servers.notes.server",
+    "browser": "mcp_servers.browser.server",
+    "email": "mcp_servers.email.server",
+    "reminders": "mcp_servers.reminders.server",
+}
+
+
+def _run_mcp_server(name: str):
+    """Import and run an MCP server module by name."""
+    module_path = _MCP_SERVERS.get(name)
+    if not module_path:
+        print(f"Unknown MCP server: {name}", file=sys.stderr)
+        sys.exit(1)
+
+    import importlib
+    try:
+        mod = importlib.import_module(module_path)
+        mod.main()
+    except Exception as e:
+        print(f"Failed to start MCP server {name}: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import PermissionsToggles from '../components/PermissionsToggles';
 import './screens.css';
 
 export default function SettingsScreen({ config, onReset }) {
@@ -96,6 +97,15 @@ export default function SettingsScreen({ config, onReset }) {
               <option value="ja">Japanese</option>
               <option value="zh">Chinese</option>
             </select>
+          </div>
+        </div>
+
+        {/* Permissions — shared component */}
+        <div className="feature-card feature-card-wide">
+          <div className="feature-card-eyebrow">PERMISSIONS</div>
+          <h3 className="feature-card-title">Tool Access</h3>
+          <div className="feature-card-body">
+            <PermissionsToggles />
           </div>
         </div>
 

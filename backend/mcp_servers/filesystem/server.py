@@ -191,6 +191,18 @@ def handle_request(request: dict) -> dict:
                             "required": ["plan_id"],
                         },
                     },
+                    {
+                        "name": "read_pdf",
+                        "description": "Extract text from a PDF file using pypdf. Returns page-by-page text content.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string", "description": "Path to the PDF file"},
+                                "max_pages": {"type": "integer", "description": "Maximum pages to extract (1-30, default 10)"},
+                            },
+                            "required": ["path"],
+                        },
+                    },
                 ],
             },
         }
@@ -361,16 +373,73 @@ def _execute_tool(tool_name: str, arguments: dict) -> dict:
             "categories": plan["categories"],
         })}]}
 
+    elif tool_name == "read_pdf":
+        path = _resolve_path(arguments.get("path", ""))
+        if not path.exists():
+            return {"content": [{"type": "text", "text": f"File not found: {path}"}]}
+        if not path.suffix.lower() == ".pdf":
+            return {"content": [{"type": "text", "text": f"Not a PDF file: {path}"}]}
+
+        max_pages = arguments.get("max_pages", 10)
+        max_pages = max(1, min(30, max_pages))  # Clamp to 1-30
+
+        try:
+            from pypdf import PdfReader
+        except ImportError:
+            return {"content": [{"type": "text", "text": "pypdf not installed. Run: uv pip install pypdf"}]}
+
+        try:
+            reader = PdfReader(str(path))
+            total_pages = len(reader.pages)
+            pages_to_read = min(max_pages, total_pages)
+            text_parts = []
+            char_count = 0
+            CHAR_CAP = 8000
+
+            for i in range(pages_to_read):
+                page_text = reader.pages[i].extract_text() or ""
+                page_text = page_text.strip()
+                if not page_text:
+                    continue
+
+                separator = f"\n\n--- Page {i + 1} ---\n\n"
+                if char_count + len(separator) + len(page_text) > CHAR_CAP:
+                    # Truncate this page to fit within cap
+                    remaining = CHAR_CAP - char_count - len(separator)
+                    if remaining > 50:
+                        text_parts.append(separator + page_text[:remaining] + "...")
+                    break
+
+                text_parts.append(separator + page_text)
+                char_count += len(separator) + len(page_text)
+
+            if not text_parts:
+                return {"content": [{"type": "text", "text": "PDF contains no extractable text (may be scanned/image-based)."}]}
+
+            result_text = "".join(text_parts)
+
+            # Add truncation notice if partial
+            if pages_to_read < total_pages or char_count >= CHAR_CAP:
+                result_text += f"\n\n(showing first {pages_to_read} of {total_pages} pages, ~{char_count} characters)"
+
+            return {"content": [{"type": "text", "text": result_text}]}
+
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"Failed to read PDF: {e}"}]}
+
     return {"content": [{"type": "text", "text": f"Unknown tool: {tool_name}"}]}
 
 
 def main():
-    """Run the MCP server over stdio — synchronous reads to avoid ProactorEventLoop."""
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
+    """Run the MCP server over stdio — synchronous reads."""
+    while True:
         try:
+            line = sys.stdin.readline()
+            if not line:
+                break
+            line = line.strip()
+            if not line:
+                continue
             request = json.loads(line)
             response = handle_request(request)
             sys.stdout.write(json.dumps(response) + "\n")

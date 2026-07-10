@@ -3,6 +3,13 @@ import './screens.css';
 
 const BACKEND_URL = 'http://127.0.0.1:8765';
 
+const MODEL_FORMATS = [
+  { id: 'gguf', label: 'GGUF', desc: 'llama.cpp compatible — runs locally via CPU/GPU.', available: true },
+  { id: 'onnx', label: 'ONNX Runtime', desc: 'Cross-platform ML format with hardware acceleration.', available: false, badge: 'Coming Soon' },
+  { id: 'transformers', label: 'Transformers (HuggingFace)', desc: 'Full HuggingFace model support with bitsandbytes quantization.', available: false, badge: 'Coming Soon' },
+  { id: 'mlx', label: 'MLX (Apple Silicon)', desc: 'Optimized for Apple M-series chips.', available: false, badge: 'Coming Soon' },
+];
+
 export default function LocalAIScreen({ config }) {
   const [modelInfo, setModelInfo] = useState(null);
   const [models, setModels] = useState([]);
@@ -103,10 +110,36 @@ export default function LocalAIScreen({ config }) {
           )}
         </div>
 
+        {/* Model Format Support */}
+        <div className="feature-card feature-card-wide">
+          <div className="feature-card-eyebrow">FORMATS</div>
+          <h3 className="feature-card-title">Model Format Support</h3>
+          <div className="feature-card-body">
+            <div className="model-format-list">
+              {MODEL_FORMATS.map((fmt) => (
+                <div
+                  key={fmt.id}
+                  className={`model-format-item ${fmt.available ? 'available' : 'disabled'}`}
+                >
+                  <div className="model-format-info">
+                    <span className="model-format-name">{fmt.label}</span>
+                    <span className="model-format-desc">{fmt.desc}</span>
+                  </div>
+                  {fmt.available ? (
+                    <span className="badge badge-active">Supported</span>
+                  ) : (
+                    <span className="badge badge-soon">{fmt.badge}</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
         {/* Model Registry */}
         <div className="feature-card feature-card-wide">
           <div className="feature-card-eyebrow">REGISTRY</div>
-          <h3 className="feature-card-title">Available Models</h3>
+          <h3 className="feature-card-title">Available GGUF Models</h3>
           <div className="feature-card-body">
             {models.length > 0 ? (
               <div className="model-list">
@@ -123,7 +156,7 @@ export default function LocalAIScreen({ config }) {
                 ))}
               </div>
             ) : (
-              <div className="feature-card-empty">No models available</div>
+              <div className="feature-card-empty">No GGUF models imported yet. Drag &amp; drop a .gguf file onto the app window to import one.</div>
             )}
           </div>
         </div>

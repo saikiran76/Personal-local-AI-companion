@@ -1,4 +1,5 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, Component } from 'react';
+import { Upload, AlertCircle, Info, Search, Send, Mic, MicOff, Square } from 'lucide-react';
 import ImportModelModal from '../components/ImportModelModal';
 
 const BACKEND_URL = 'http://127.0.0.1:8765';
@@ -67,10 +68,26 @@ function parseSSE(buffer) {
 }
 
 /* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+/*  Error boundary — prevents one bad message from crashing the chat   */
+/* ------------------------------------------------------------------ */
+
+class MessageErrorBoundary extends Component {
+  state = { hasError: false };
+  static getDerivedStateFromError() { return { hasError: true }; }
+  render() {
+    if (this.state.hasError) {
+      return <div className="message-error" style={{ padding: 12, color: 'var(--color-faint)', fontSize: 13 }}>Couldn't render this message.</div>;
+    }
+    return this.props.children;
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /*  ComposeEmailForm — embedded in the chat stream                    */
 /* ------------------------------------------------------------------ */
 
-function ComposeEmailForm({ initialTo, initialSubject, initialBody, onDraft, onSend, onCancel }) {
+function ComposeEmailForm({ initialTo, initialSubject, initialBody, onDraft, onSend, onCancel, conversationId }) {
   const [to, setTo] = useState(initialTo || '');
   const [subject, setSubject] = useState(initialSubject || '');
   const [body, setBody] = useState(initialBody || '');
@@ -82,10 +99,12 @@ function ComposeEmailForm({ initialTo, initialSubject, initialBody, onDraft, onS
     if (!brief.trim()) return;
     setDrafting(true);
     try {
+      const reqBody = { brief: brief.trim(), to, subject };
+      if (conversationId) reqBody.conversation_id = conversationId;
       const res = await fetch(`${BACKEND_URL}/chat/draft`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ brief: brief.trim(), to, subject }),
+        body: JSON.stringify(reqBody),
       });
       const data = await res.json();
       if (data.body) {
@@ -205,6 +224,82 @@ function ComposeEmailForm({ initialTo, initialSubject, initialBody, onDraft, onS
   );
 }
 
+/*  ReminderForm — embedded in the chat stream                         */
+/* ------------------------------------------------------------------ */
+
+function ReminderForm({ initialTitle, initialDate, initialTime, onSubmit, onCancel, conversationId }) {
+  const [title, setTitle] = useState(initialTitle || '');
+  const today = (() => { try { return new Date().toISOString().slice(0, 10); } catch { return ''; } })();
+  const [dueDate, setDueDate] = useState(initialDate || today);
+  const [dueTime, setDueTime] = useState(initialTime || '');
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleSubmit = async () => {
+    if (!title.trim()) return;
+    setSubmitting(true);
+    try {
+      await onSubmit({ title: title.trim(), due_date: dueDate, due_time: dueTime || undefined });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="compose-form">
+      <div className="compose-header">
+        <span className="compose-icon">⏰</span>
+        <span className="compose-title">Set Reminder</span>
+      </div>
+      <div className="compose-fields">
+        <div className="compose-field">
+          <label>What</label>
+          <input
+            type="text"
+            className="text-input"
+            placeholder="e.g. Meeting with team"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+          />
+        </div>
+        <div className="compose-field">
+          <label>Date</label>
+          <input
+            type="date"
+            className="text-input"
+            value={dueDate}
+            onChange={(e) => setDueDate(e.target.value)}
+          />
+        </div>
+        <div className="compose-field">
+          <label>Time (optional)</label>
+          <input
+            type="time"
+            className="text-input"
+            value={dueTime}
+            onChange={(e) => setDueTime(e.target.value)}
+          />
+        </div>
+      </div>
+      <div className="compose-actions">
+        <button
+          className="compose-btn compose-send"
+          disabled={!title.trim() || submitting}
+          onClick={handleSubmit}
+        >
+          {submitting ? 'Setting...' : 'Set Reminder'}
+        </button>
+        <button
+          className="compose-btn compose-cancel"
+          disabled={submitting}
+          onClick={onCancel}
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /*  ChatScreen                                                        */
 /* ------------------------------------------------------------------ */
@@ -223,19 +318,32 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
   const [modelAdvisor, setModelAdvisor] = useState(null);
   const [pendingClarify, setPendingClarify] = useState(null);
   const [pendingConfirm, setPendingConfirm] = useState(null);
+  const [pendingPermission, setPendingPermission] = useState(null);
   const [conversations, setConversations] = useState([]);
   const [activeConversationId, setActiveConversationId] = useState(null);
   const pendingClarifyRef = useRef(null);
   const pendingConfirmRef = useRef(null);
+  const pendingPermissionRef = useRef(null);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
   const eventSourceRef = useRef(null);
   const abortRef = useRef(null);
   const streamingRef = useRef(false);
   const assistantMsgIdRef = useRef(null);
+  const sendMessageRef = useRef(null);
+
+  // Voice state
+  const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [ttsQueue, setTtsQueue] = useState([]);
+  const ttsQueueRef = useRef([]);
+  const ttsPlayingRef = useRef(false);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const audioContextRef = useRef(null);
 
   const userName = config?.userName || 'User';
-  const assistantName = config?.assistantName || 'Companion';
+  const assistantName = config?.assistantName || 'Luna';
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -404,8 +512,10 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
 
     setPendingClarify(null);
     setPendingConfirm(null);
+    setPendingPermission(null);
     pendingClarifyRef.current = null;
     pendingConfirmRef.current = null;
+    pendingPermissionRef.current = null;
 
     if (isResponse && (hadClarify || hadConfirm)) {
       await streamFromBackend(trimmed, trimmed);
@@ -430,6 +540,7 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
       content: '',
       toolCalls: [],
       timestamp: new Date(),
+      isThinking: true,
     };
 
     assistantMsgIdRef.current = assistantMsg.id;
@@ -473,6 +584,8 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                 setIsThinking(false);
                 if (event.data.content) {
                   updateMessage(targetId, (msg) => {
+                    msg.isThinking = false;
+                    msg.statusText = '';
                     msg.content += event.data.content;
                   });
                 }
@@ -480,6 +593,23 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
 
               case 'thinking':
                 setIsThinking(true);
+                // Ensure assistant message exists for thinking dots
+                updateMessage(targetId, (msg) => {
+                  msg.isThinking = true;
+                });
+                break;
+
+              case 'status':
+                // Status text shows alongside thinking dots — don't clear isThinking
+                updateMessage(targetId, (msg) => {
+                  msg.statusText = event.data.content;
+                });
+                break;
+
+              case 'perf_tip':
+                updateMessage(targetId, (msg) => {
+                  msg.perfTip = event.data.content;
+                });
                 break;
 
               case 'clear':
@@ -497,6 +627,7 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                   status: 'running',
                 });
                 updateMessage(targetId, (msg) => {
+                  msg.isThinking = false;
                   msg.toolCalls = [
                     ...(msg.toolCalls || []),
                     {
@@ -538,6 +669,8 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                   arguments: event.data.arguments,
                 };
                 updateMessage(targetId, (msg) => {
+                  msg.isThinking = false;
+                  msg.statusText = '';
                   msg.content = event.data.message;
                 });
                 break;
@@ -556,16 +689,53 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                   arguments: event.data.arguments,
                 };
                 updateMessage(targetId, (msg) => {
+                  msg.isThinking = false;
+                  msg.statusText = '';
                   msg.content = event.data.message;
                 });
                 break;
+
+              case 'permission_request': {
+                setIsThinking(false);
+                setActiveTool(null);
+                const pScope = event.data.arguments?.scope || event.data.tool || 'this';
+                const pToolName = event.data.tool || '';
+                const pToolArgs = event.data.arguments || {};
+                // Find the last user message to re-send on approve
+                let lastUserMsg = '';
+                for (let i = messages.length - 1; i >= 0; i--) {
+                  if (messages[i].role === 'user') { lastUserMsg = messages[i].content; break; }
+                }
+                console.log('[Permission] Captured lastUserMsg:', lastUserMsg ? lastUserMsg.slice(0, 50) : '(empty)');
+                setPendingPermission({
+                  message: event.data.message,
+                  scope: pScope,
+                  toolName: pToolName,
+                  toolArgs: pToolArgs,
+                  originalMessage: lastUserMsg,
+                });
+                pendingPermissionRef.current = {
+                  message: event.data.message,
+                  scope: pScope,
+                  toolName: pToolName,
+                  toolArgs: pToolArgs,
+                  originalMessage: lastUserMsg,
+                };
+                updateMessage(targetId, (msg) => {
+                  msg.isThinking = false;
+                  msg.statusText = '';
+                  msg.content = event.data.message;
+                });
+                break;
+              }
 
               case 'compose_form': {
                 setIsThinking(false);
                 setActiveTool(null);
                 const args = event.data.arguments || {};
-                // Embed the compose form directly into the assistant message
                 updateMessage(targetId, (msg) => {
+                  msg.isThinking = false;
+                  msg.statusText = '';
                   msg.composeForm = {
                     to: args.to || '',
                     subject: args.subject || '',
@@ -576,9 +746,32 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                 break;
               }
 
+              case 'reminder_form': {
+                setIsThinking(false);
+                setActiveTool(null);
+                const rArgs = event.data.arguments || {};
+                updateMessage(targetId, (msg) => {
+                  msg.isThinking = false;
+                  msg.statusText = '';
+                  msg.reminderForm = {
+                    title: rArgs.title || '',
+                    due_date: rArgs.due_date || new Date().toISOString().slice(0, 10),
+                    due_time: rArgs.due_time || '',
+                  };
+                  msg.content = event.data.message || 'Set a reminder:';
+                });
+                break;
+              }
+
               case 'done':
                 setIsThinking(false);
                 setActiveTool(null);
+                updateMessage(targetId, (msg) => {
+                  msg.isThinking = false;
+                });
+                if (event.data.conversation_id && !activeConversationId) {
+                  setActiveConversationId(event.data.conversation_id);
+                }
                 loadConversations();
                 break;
 
@@ -586,8 +779,20 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                 setIsThinking(false);
                 setActiveTool(null);
                 updateMessage(targetId, (msg) => {
+                  msg.isThinking = false;
+                  msg.statusText = '';
                   if (!msg.content) msg.content = `Error: ${event.data.error}`;
                 });
+                break;
+
+              case 'audio':
+                // Queue TTS audio for sequential playback
+                if (event.data.content) {
+                  ttsQueueRef.current.push(event.data.content);
+                  if (!ttsPlayingRef.current) {
+                    playNextTts();
+                  }
+                }
                 break;
             }
           }
@@ -606,6 +811,15 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
       setIsStreaming(false);
       setIsThinking(false);
       setActiveTool(null);
+      // Clean up any stuck isThinking messages from this stream
+      const stuckId = assistantMsgIdRef.current;
+      if (stuckId) {
+        updateMessage(stuckId, (msg) => {
+          if (msg.isThinking && !msg.content && !msg.composeForm && !msg.reminderForm) {
+            msg.isThinking = false;
+          }
+        });
+      }
       assistantMsgIdRef.current = null;
       abortRef.current = null;
     }
@@ -615,16 +829,22 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
 
   const handleComposeDraft = async (slots) => {
     try {
+      const body = {
+        tool_name: 'draft_email',
+        tool_args: { to: slots.to, subject: slots.subject, body: slots.body },
+      };
+      if (activeConversationId) body.conversation_id = activeConversationId;
       const res = await fetch(`${BACKEND_URL}/tools/call`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          tool_name: 'draft_email',
-          tool_args: { to: slots.to, subject: slots.subject, body: slots.body },
-        }),
+        body: JSON.stringify(body),
       });
       const result = await res.json();
       const filename = result.filename || 'email.eml';
+      if (result.conversation_id && !activeConversationId) {
+        setActiveConversationId(result.conversation_id);
+        loadConversations();
+      }
       setMessages((prev) => [...prev, {
         id: Date.now(),
         role: 'assistant',
@@ -644,13 +864,15 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
 
   const handleComposeSend = async (slots) => {
     try {
+      const body = {
+        tool_name: 'open_email_client',
+        tool_args: { to: slots.to, subject: slots.subject, body: slots.body },
+      };
+      if (activeConversationId) body.conversation_id = activeConversationId;
       await fetch(`${BACKEND_URL}/tools/call`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          tool_name: 'open_email_client',
-          tool_args: { to: slots.to, subject: slots.subject, body: slots.body },
-        }),
+        body: JSON.stringify(body),
       });
     } catch { /* mailto is best-effort */ }
     setMessages((prev) => [...prev, {
@@ -663,6 +885,51 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
   };
 
   const handleComposeCancel = () => {
+    setMessages((prev) => [...prev, {
+      id: Date.now(),
+      role: 'assistant',
+      content: 'Okay, cancelled.',
+      timestamp: new Date(),
+    }]);
+  };
+
+  /* ---- Reminder form handlers ---- */
+
+  const handleReminderSubmit = async (slots) => {
+    let scheduledMsg = '';
+    try {
+      const body = {
+        tool_name: 'create_reminder',
+        tool_args: { title: slots.title, due_date: slots.due_date, due_time: slots.due_time },
+      };
+      if (activeConversationId) body.conversation_id = activeConversationId;
+      const resp = await fetch(`${BACKEND_URL}/tools/call`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json();
+      console.log('[Reminder] /tools/call response:', data);
+      // Extract scheduled status from the tool result
+      try {
+        const parsed = JSON.parse(data.result);
+        scheduledMsg = parsed.scheduled || '';
+      } catch { /* result may not be JSON */ }
+    } catch { /* best-effort */ }
+
+    const timeStr = slots.due_time ? ` at ${slots.due_time}` : '';
+    const schedStr = scheduledMsg ? `\n\n${scheduledMsg}` : '';
+    setMessages((prev) => [...prev, {
+      id: Date.now(),
+      role: 'assistant',
+      content: `Reminder set: **${slots.title}** on ${slots.due_date}${timeStr}.${schedStr}`,
+      toolCalls: [{ name: 'create_reminder', status: 'done', result: 'Created' }],
+      timestamp: new Date(),
+    }]);
+    loadConversations();
+  };
+
+  const handleReminderCancel = () => {
     setMessages((prev) => [...prev, {
       id: Date.now(),
       role: 'assistant',
@@ -688,17 +955,13 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
       toolCalls: [],
       timestamp: new Date(),
     };
+    assistantMsgIdRef.current = assistantMsg.id;
     setMessages((prev) => [...prev, assistantMsg]);
 
     for (let i = 0; i < response.length; i += 3) {
       await new Promise((r) => setTimeout(r, 15));
       const chunk = response.slice(0, i + 3);
-      setMessages((prev) => {
-        const updated = [...prev];
-        const last = updated[updated.length - 1];
-        if (last.role === 'assistant') last.content = chunk;
-        return updated;
-      });
+      updateMessage(assistantMsg.id, (msg) => { msg.content = chunk; });
     }
     setIsStreaming(false);
     streamingRef.current = false;
@@ -725,21 +988,205 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
       toolCalls: [],
       timestamp: new Date(),
     };
+    assistantMsgIdRef.current = assistantMsg.id;
     setMessages((prev) => [...prev, assistantMsg]);
 
     for (let i = 0; i < response.length; i += 3) {
       await new Promise((r) => setTimeout(r, 12));
       const chunk = response.slice(0, i + 3);
-      setMessages((prev) => {
-        const updated = [...prev];
-        const last = updated[updated.length - 1];
-        if (last.role === 'assistant') last.content = chunk;
-        return updated;
-      });
+      updateMessage(assistantMsg.id, (msg) => { msg.content = chunk; });
     }
     setIsStreaming(false);
     streamingRef.current = false;
   };
+
+  // Keep ref updated for voice callbacks
+  sendMessageRef.current = sendMessage;
+
+  // --- Voice: TTS playback ---
+  const playNextTts = useCallback(async () => {
+    if (ttsPlayingRef.current || ttsQueueRef.current.length === 0) return;
+    ttsPlayingRef.current = true;
+    const filePath = ttsQueueRef.current.shift();
+
+    try {
+      const audioUrl = filePath.startsWith('http')
+        ? filePath
+        : `file:///${filePath.replace(/\\/g, '/')}`;
+      const audio = new Audio(audioUrl);
+      await new Promise((resolve, reject) => {
+        audio.onended = resolve;
+        audio.onerror = reject;
+        audio.play();
+      });
+    } catch (e) {
+      console.warn('TTS playback failed:', e);
+    } finally {
+      ttsPlayingRef.current = false;
+      if (ttsQueueRef.current.length > 0) {
+        playNextTts();
+      }
+    }
+  }, []);
+
+  // --- Voice: WAV encoding from raw PCM ---
+  const encodeWav = useCallback((channelData, sampleRate) => {
+    const numChannels = 1;
+    const bitsPerSample = 16;
+    const numSamples = channelData.length;
+    const bytesPerSample = bitsPerSample / 8;
+    const blockAlign = numChannels * bytesPerSample;
+    const dataSize = numSamples * blockAlign;
+    const buffer = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(buffer);
+
+    const writeString = (offset, str) => {
+      for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+    };
+    writeString(0, 'RIFF');
+    view.setUint32(4, 36 + dataSize, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); // PCM
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * blockAlign, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitsPerSample, true);
+    writeString(36, 'data');
+    view.setUint32(40, dataSize, true);
+
+    let offset = 44;
+    for (let i = 0; i < numSamples; i++) {
+      const sample = Math.max(-1, Math.min(1, channelData[i]));
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+      offset += 2;
+    }
+
+    return new Blob([buffer], { type: 'audio/wav' });
+  }, []);
+
+  // --- Voice: Push-to-talk start ---
+  const startRecording = useCallback(async () => {
+    if (isRecording || isTranscribing || isStreaming) return;
+    if (!navigator.mediaDevices?.getUserMedia) return;
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      audioContextRef.current = ctx;
+      const source = ctx.createMediaStreamSource(stream);
+      const processor = ctx.createScriptProcessor(4096, 1, 1);
+
+      const audioBuffer = [];
+      processor.onaudioprocess = (e) => {
+        audioBuffer.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+      };
+
+      source.connect(processor);
+      processor.connect(ctx.destination);
+
+      mediaRecorderRef.current = {
+        stream, source, processor, audioBuffer,
+        stop: () => {
+          processor.disconnect();
+          source.disconnect();
+          stream.getTracks().forEach(t => t.stop());
+          ctx.close();
+        },
+      };
+      setIsRecording(true);
+    } catch (err) {
+      console.error('Mic access denied:', err);
+      const errMsg = {
+        id: Date.now(),
+        role: 'assistant',
+        content: err.name === 'NotAllowedError'
+          ? "Microphone access denied. Please allow mic access in your browser settings and try again."
+          : "Could not access microphone. Please check your audio device.",
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, errMsg]);
+    }
+  }, [isRecording, isTranscribing, isStreaming]);
+
+  // --- Voice: Push-to-talk stop + transcribe ---
+  const stopRecording = useCallback(async () => {
+    if (!isRecording || !mediaRecorderRef.current) return;
+    setIsRecording(false);
+    setIsTranscribing(true);
+
+    const { audioBuffer, stop } = mediaRecorderRef.current;
+    stop();
+
+    if (audioBuffer.length === 0) {
+      setIsTranscribing(false);
+      return;
+    }
+
+    const totalLength = audioBuffer.reduce((sum, buf) => sum + buf.length, 0);
+    const merged = new Float32Array(totalLength);
+    let off = 0;
+    for (const buf of audioBuffer) {
+      merged.set(buf, off);
+      off += buf.length;
+    }
+
+    const sampleRate = audioContextRef.current?.sampleRate || 44100;
+    const wavBlob = encodeWav(merged, sampleRate);
+
+    try {
+      const reader = new FileReader();
+      reader.onload = async () => {
+        try {
+          const base64 = reader.result.split(',')[1];
+          const resp = await fetch(`${BACKEND_URL}/voice/transcribe`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ wav_base64: base64 }),
+          });
+          const data = await resp.json();
+          if (data.error) {
+            // Show transcription error as assistant message
+            const errMsg = {
+              id: Date.now(),
+              role: 'assistant',
+              content: `Voice error: ${data.error}`,
+              timestamp: new Date(),
+            };
+            setMessages((prev) => [...prev, errMsg]);
+          } else if (data.text && sendMessageRef.current) {
+            sendMessageRef.current(data.text);
+          } else {
+            // Empty transcription — show feedback
+            const emptyMsg = {
+              id: Date.now(),
+              role: 'assistant',
+              content: "I couldn't hear anything. Try speaking closer to the microphone.",
+              timestamp: new Date(),
+            };
+            setMessages((prev) => [...prev, emptyMsg]);
+          }
+        } catch (fetchErr) {
+          console.error('Transcription request failed:', fetchErr);
+          const errMsg = {
+            id: Date.now(),
+            role: 'assistant',
+            content: "Voice service is starting up. Please try again in a moment.",
+            timestamp: new Date(),
+          };
+          setMessages((prev) => [...prev, errMsg]);
+        } finally {
+          setIsTranscribing(false);
+        }
+      };
+      reader.readAsDataURL(wavBlob);
+    } catch (err) {
+      console.error('Transcription failed:', err);
+      setIsTranscribing(false);
+    }
+  }, [isRecording, encodeWav]);
 
   /* ---- Input handling ---- */
 
@@ -770,9 +1217,7 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
             <span>New chat</span>
           </button>
           <button className="sidebar-import-model" onClick={() => setShowImportModal(true)}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
-            </svg>
+            <Upload size={14} strokeWidth={2} />
             <span>Import model</span>
           </button>
         </div>
@@ -828,18 +1273,14 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
               >
                 {!modelAvailable ? (
                   <>
-                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 4 }}>
-                      <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-                    </svg>
+                    <AlertCircle size={10} strokeWidth={2} style={{ marginRight: 4 }} />
                     no model
                   </>
                 ) : modelInfo.quantization === 'mock' ? 'mock' : modelInfo.device}
               </span>
             )}
             <button className="chat-header-btn" title="Search">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-              </svg>
+              <Search size={14} strokeWidth={2} />
             </button>
           </div>
         </div>
@@ -876,16 +1317,12 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
             {(backendStatus === BACKEND.READY || backendStatus === BACKEND.ERROR) && !modelAvailable && (
               <div className="chat-no-model-prompt">
                 <div className="chat-no-model-icon">
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
-                  </svg>
+                  <Upload size={24} strokeWidth={1.5} />
                 </div>
                 <p className="chat-no-model-text">No model loaded yet</p>
                 <p className="chat-no-model-hint">Import a .gguf model file to enable local AI inference</p>
                 <button className="chat-no-model-btn" onClick={() => setShowImportModal(true)}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
-                  </svg>
+                  <Upload size={14} strokeWidth={2} />
                   Import model
                 </button>
               </div>
@@ -894,9 +1331,7 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
             {modelAvailable && modelAdvisor && (
               <div className="chat-advisor-banner">
                 <div className="chat-advisor-icon">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
-                  </svg>
+                  <Info size={16} strokeWidth={1.5} />
                 </div>
                 <div className="chat-advisor-text">
                   <span className="chat-advisor-title">Model upgrade recommended</span>
@@ -927,7 +1362,8 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
           <div className="chat-messages">
             <div className="chat-messages-inner">
               {messages.map((msg) => (
-                <div key={msg.id} className={`message message-${msg.role}`}>
+                <MessageErrorBoundary key={msg.id}>
+                <div className={`message message-${msg.role}`}>
                   <div className="message-avatar">
                     {msg.role === 'assistant'
                       ? getAssistantInitial(assistantName)
@@ -952,12 +1388,37 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                     )}
 
                     {/* Message content */}
-                    {msg.content && (
+                    {msg.content ? (
                       <div className="message-content">
                         {msg.content.split('\n').map((p, i) => (
                           <p key={i}>{p}</p>
                         ))}
                       </div>
+                    ) : msg.isThinking ? (
+                      <div className="message-content message-thinking">
+                        <span className="typing-indicator">
+                          <span className="typing-dot" />
+                          <span className="typing-dot" />
+                          <span className="typing-dot" />
+                        </span>
+                        {msg.statusText && (
+                          <span className="message-status-text">{msg.statusText}</span>
+                        )}
+                      </div>
+                    ) : msg.statusText ? (
+                      <div className="message-content">
+                        <span className="message-status-text">{msg.statusText}</span>
+                      </div>
+                    ) : null}
+
+                    {/* Status indicator — italic muted text within same bubble */}
+                    {msg.statusText && (
+                      <div className="message-status-text">{msg.statusText}</div>
+                    )}
+
+                    {/* Perf tip — distinct card within same bubble */}
+                    {msg.perfTip && (
+                      <div className="perf-tip-card">{msg.perfTip}</div>
                     )}
 
                     {/* Compose form — embedded inline in the message */}
@@ -969,6 +1430,19 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                         onDraft={handleComposeDraft}
                         onSend={handleComposeSend}
                         onCancel={handleComposeCancel}
+                        conversationId={activeConversationId}
+                      />
+                    )}
+
+                    {/* Reminder form — embedded inline in the message */}
+                    {msg.reminderForm && (
+                      <ReminderForm
+                        initialTitle={msg.reminderForm.title}
+                        initialDate={msg.reminderForm.due_date}
+                        initialTime={msg.reminderForm.due_time}
+                        onSubmit={handleReminderSubmit}
+                        onCancel={handleReminderCancel}
+                        conversationId={activeConversationId}
                       />
                     )}
 
@@ -977,6 +1451,7 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                     </div>
                   </div>
                 </div>
+                </MessageErrorBoundary>
               ))}
 
               {/* Clarify prompt */}
@@ -1030,23 +1505,60 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                 </div>
               )}
 
-              {/* Thinking indicator */}
-              {isThinking && isStreaming && !activeTool && (
-                <div className="message message-assistant">
-                  <div className="message-avatar">
-                    {getAssistantInitial(assistantName)}
-                  </div>
-                  <div className="message-body">
-                    <div className="message-content">
-                      <div className="typing-indicator">
-                        <div className="typing-dot" />
-                        <div className="typing-dot" />
-                        <div className="typing-dot" />
-                      </div>
-                    </div>
+              {/* Permission prompt */}
+              {pendingPermission && !isStreaming && (
+                <div className="confirm-prompt">
+                  <div className="confirm-icon">🔒</div>
+                  <div className="confirm-actions">
+                    <button
+                      className="confirm-btn confirm-yes"
+                      onClick={async () => {
+                        const pp = pendingPermission;
+                        console.log('[Permission] Allow clicked, pp:', JSON.stringify(pp));
+                        setPendingPermission(null);
+                        pendingPermissionRef.current = null;
+                        try {
+                          const res = await fetch(`${BACKEND_URL}/permissions`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ scope: pp.scope, granted: true }),
+                          });
+                          console.log('[Permission] POST /permissions status:', res.status);
+                          // Re-send original message to retry the tool call
+                          if (pp.originalMessage) {
+                            console.log('[Permission] Re-sending message:', pp.originalMessage.slice(0, 50));
+                            await streamFromBackend(pp.originalMessage);
+                          } else {
+                            console.log('[Permission] No originalMessage to re-send!');
+                          }
+                        } catch (e) { console.log('[Permission] Error:', e); }
+                      }}
+                    >
+                      Allow
+                    </button>
+                    <button
+                      className="confirm-btn confirm-no"
+                      onClick={() => {
+                        const pp = pendingPermission;
+                        setPendingPermission(null);
+                        pendingPermissionRef.current = null;
+                        setMessages((prev) => [...prev, {
+                          id: Date.now(),
+                          role: 'assistant',
+                          content: `Permission denied for **${pp.scope}** access.`,
+                          timestamp: new Date(),
+                        }]);
+                        setIsStreaming(false);
+                        streamingRef.current = false;
+                      }}
+                    >
+                      Deny
+                    </button>
                   </div>
                 </div>
               )}
+
+              {/* Thinking indicator — removed, now part of the assistant message */}
 
               {/* Active tool indicator — prominent bar */}
               {activeTool && isStreaming && (
@@ -1061,23 +1573,7 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                 </div>
               )}
 
-              {/* Typing indicator */}
-              {isStreaming && !isThinking && !activeTool && (
-                <div className="message message-assistant">
-                  <div className="message-avatar">
-                    {getAssistantInitial(assistantName)}
-                  </div>
-                  <div className="message-body">
-                    <div className="message-content">
-                      <div className="typing-indicator">
-                        <div className="typing-dot" />
-                        <div className="typing-dot" />
-                        <div className="typing-dot" />
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
+              {/* Typing indicator — now part of the assistant message via msg.isThinking */}
               <div ref={messagesEndRef} />
             </div>
           </div>
@@ -1085,6 +1581,18 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
 
         {/* Input Area */}
         <div className="chat-input-area">
+          {isRecording && (
+            <div className="voice-recording-bar">
+              <div className="voice-recording-dot" />
+              <span>Recording... release mic to send</span>
+            </div>
+          )}
+          {isTranscribing && (
+            <div className="voice-transcribing-bar">
+              <div className="mic-spinner" />
+              <span>Transcribing...</span>
+            </div>
+          )}
           <div className="chat-input-wrapper">
             <div className="chat-input-box">
               <textarea
@@ -1092,7 +1600,9 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                 className="chat-input"
                 rows={1}
                 placeholder={
-                  pendingClarify ? 'Type your answer above...'
+                  isRecording ? 'Recording... release to send'
+                  : isTranscribing ? 'Transcribing...'
+                  : pendingClarify ? 'Type your answer above...'
                   : pendingConfirm ? 'Click Confirm or Cancel above...'
                   : isModelLoading ? 'Model is loading...'
                   : isThinking ? 'Thinking...'
@@ -1104,16 +1614,34 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                 onKeyDown={handleKeyDown}
                 disabled={isModelLoading || !!pendingClarify || !!pendingConfirm}
               />
-              <button
-                className="chat-send-btn"
-                disabled={!input.trim() || isStreaming || isModelLoading}
-                onClick={() => sendMessage()}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="22" y1="2" x2="11" y2="13"/>
-                  <polygon points="22 2 15 22 11 13 2 9 22 2"/>
-                </svg>
-              </button>
+              {input.trim() ? (
+                <button
+                  className="chat-send-btn"
+                  disabled={isStreaming || isModelLoading}
+                  onClick={() => sendMessage()}
+                >
+                  <Send size={14} strokeWidth={2} />
+                </button>
+              ) : (
+                <button
+                  className={`chat-mic-btn ${isRecording ? 'recording' : ''} ${isTranscribing ? 'transcribing' : ''}`}
+                  disabled={isStreaming || isModelLoading || isTranscribing}
+                  onMouseDown={startRecording}
+                  onMouseUp={stopRecording}
+                  onMouseLeave={() => { if (isRecording) stopRecording(); }}
+                  onTouchStart={startRecording}
+                  onTouchEnd={stopRecording}
+                  title={isRecording ? 'Release to send' : isTranscribing ? 'Transcribing...' : 'Hold to speak'}
+                >
+                  {isTranscribing ? (
+                    <div className="mic-spinner" />
+                  ) : isRecording ? (
+                    <Square size={12} strokeWidth={2} fill="currentColor" />
+                  ) : (
+                    <Mic size={14} strokeWidth={2} />
+                  )}
+                </button>
+              )}
             </div>
             <div className="chat-input-footer">
               <span className="chat-input-hint">

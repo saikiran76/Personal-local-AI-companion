@@ -195,12 +195,15 @@ def _execute_tool(tool_name: str, arguments: dict) -> dict:
 
 
 def main():
-    """Run the MCP server over stdio — synchronous reads to avoid ProactorEventLoop."""
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
+    """Run the MCP server over stdio — synchronous reads."""
+    while True:
         try:
+            line = sys.stdin.readline()
+            if not line:
+                break
+            line = line.strip()
+            if not line:
+                continue
             request = json.loads(line)
             response = handle_request(request)
             sys.stdout.write(json.dumps(response) + "\n")

@@ -23,25 +23,31 @@ const LANGUAGES = [
 
 const MODELS = [
   {
+    id: 'bring',
+    label: 'Bring your own (.GGUF)',
+    desc: 'Point to a local GGUF model file you already have.',
+    available: true,
+  },
+  {
     id: 'auto',
     label: 'Phi-3 Mini (3.8B)',
     desc: 'Fast, lightweight — best for everyday tasks.',
-    badge: 'Recommended',
+    badge: 'Coming Soon',
+    available: false,
   },
   {
     id: 'medium',
     label: 'Llama 3.1 (8B)',
     desc: 'Balanced performance and speed.',
+    badge: 'Coming Soon',
+    available: false,
   },
   {
     id: 'heavy',
     label: 'Llama 3.1 (70B)',
     desc: 'Most capable, requires significant RAM/VRAM.',
-  },
-  {
-    id: 'bring',
-    label: 'Bring your own',
-    desc: 'Point to a local GGUF/ONNX file.',
+    badge: 'Coming Soon',
+    available: false,
   },
 ];
 
@@ -61,10 +67,10 @@ function ProgressDots({ active }) {
 export default function SetupScreen({ onComplete }) {
   const [step, setStep] = useState(0);
   const [username, setUsername] = useState('');
-  const [assistantName, setAssistantName] = useState('Companion');
+  const [assistantName, setAssistantName] = useState('Luna');
   const [language, setLanguage] = useState('en');
   const [theme, setTheme] = useState('light');
-  const [model, setModel] = useState('auto');
+  const [model, setModel] = useState('bring');
 
   const next = () => setStep((s) => Math.min(s + 1, SETUP_STEPS.length - 1));
   const prev = () => setStep((s) => Math.max(s - 1, 0));
@@ -118,7 +124,7 @@ export default function SetupScreen({ onComplete }) {
             <input
               className="text-input"
               type="text"
-              placeholder="e.g. Companion, Nova, Atlas"
+              placeholder="e.g. Luna, Nova, Atlas"
               value={assistantName}
               onChange={(e) => setAssistantName(e.target.value)}
               autoFocus
@@ -226,15 +232,15 @@ export default function SetupScreen({ onComplete }) {
           {MODELS.map((opt) => (
             <div
               key={opt.id}
-              className={`option-item ${model === opt.id ? 'selected' : ''}`}
-              onClick={() => setModel(opt.id)}
+              className={`option-item ${model === opt.id ? 'selected' : ''} ${!opt.available ? 'option-disabled' : ''}`}
+              onClick={() => opt.available && setModel(opt.id)}
             >
               <div className="option-radio" />
               <div className="option-content">
                 <div className="option-label">{opt.label}</div>
                 <div className="option-desc">{opt.desc}</div>
               </div>
-              {opt.badge && <span className="option-badge">{opt.badge}</span>}
+              {opt.badge && <span className="option-badge option-badge-soon">{opt.badge}</span>}
             </div>
           ))}
         </div>

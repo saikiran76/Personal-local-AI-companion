@@ -283,7 +283,7 @@
   gap: 12px;
   background: #fef3c7;
   border: 1px solid #f59e0b;
-  border-radius: var(--radius-md);
+  border-radius: var(--rounded-md);
   padding: 16px;
   margin-top: var(--spacing-md);
   max-width: 560px;
@@ -515,10 +515,16 @@
 }
 
 /* --- Typing Indicator --- */
-.typing-indicator {
+.message-thinking {
   display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.typing-indicator {
+  display: inline-flex;
   gap: 4px;
-  padding: 12px 14px;
+  padding: 0;
 }
 
 .typing-dot {
@@ -535,6 +541,26 @@
 @keyframes typingBounce {
   0%, 60%, 100% { transform: translateY(0); }
   30% { transform: translateY(-4px); }
+}
+
+/* --- Status / Progress Indicator --- */
+.message-status-text {
+  font-style: italic;
+  color: var(--color-foreground-3, #888);
+  font-size: 13px;
+  opacity: 0.8;
+  display: inline;
+}
+
+/* --- Perf Tip --- */
+.perf-tip-card {
+  background: #f0f9ff;
+  color: #1a2733;
+  border-left: 3px solid #0ea5e9;
+  padding: 10px 14px;
+  border-radius: var(--rounded-md);
+  font-size: 13px;
+  margin-top: 6px;
 }
 
 /* --- Chat Input --- */
@@ -634,6 +660,12 @@
 .theme-dark .message-assistant .message-avatar {
   background: #ededed;
   color: #0a0a0a;
+}
+
+.theme-dark .perf-tip-card {
+  background: #0c1929;
+  color: #b0c4de;
+  border-left-color: #0ea5e9;
 }
 
 .theme-dark .tool-call.running {

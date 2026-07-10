@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Plus, Zap } from 'lucide-react';
 import './screens.css';
 
 const AUTOMATIONS = [
@@ -20,9 +21,7 @@ export default function AutomationsScreen({ config }) {
 
       <div className="screen-toolbar">
         <button className="btn-primary">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-          </svg>
+          <Plus size={14} strokeWidth={2} />
           New Automation
         </button>
       </div>
@@ -32,9 +31,7 @@ export default function AutomationsScreen({ config }) {
           <div key={auto.id} className="feature-card">
             <div className="feature-card-header">
               <div className="feature-card-icon">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                  <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
-                </svg>
+                <Zap size={16} strokeWidth={1.5} />
               </div>
               <span className={`badge badge-${auto.status}`}>{auto.status}</span>
             </div>
@@ -51,9 +48,7 @@ export default function AutomationsScreen({ config }) {
         {/* Template cards */}
         <div className="feature-card feature-card-add">
           <div className="feature-card-add-icon">
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-            </svg>
+            <Plus size={24} strokeWidth={1.5} />
           </div>
           <h3 className="feature-card-title">Create Custom</h3>
           <p className="feature-card-desc">Build your own automation workflow</p>

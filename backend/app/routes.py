@@ -206,6 +206,11 @@ async def events(request: Request):
             _agent = AgentOrchestrator(_model_loader, _mcp_manager)
             await _agent.initialize()
 
+        # Start STT server in background (non-blocking)
+        from .voice import stt_client
+        if not stt_client.is_ready:
+            asyncio.create_task(stt_client.start())
+
         yield {
             "event": "backend_ready",
             "data": json.dumps({
@@ -265,6 +270,16 @@ async def chat(request: Request):
                         "event": "thinking",
                         "data": json.dumps({"content": event.content}),
                     }
+                elif event.type == "status":
+                    yield {
+                        "event": "status",
+                        "data": json.dumps({"content": event.content}),
+                    }
+                elif event.type == "perf_tip":
+                    yield {
+                        "event": "perf_tip",
+                        "data": json.dumps({"content": event.content}),
+                    }
                 elif event.type == "clear":
                     yield {"event": "clear", "data": json.dumps({})}
                 elif event.type == "tool_call":
@@ -304,6 +319,15 @@ async def chat(request: Request):
                             "arguments": event.tool_args,
                         }),
                     }
+                elif event.type == "reminder_form":
+                    yield {
+                        "event": "reminder_form",
+                        "data": json.dumps({
+                            "message": event.content,
+                            "tool": event.tool_name,
+                            "arguments": event.tool_args,
+                        }),
+                    }
                 elif event.type == "confirm":
                     yield {
                         "event": "confirm",
@@ -313,8 +337,18 @@ async def chat(request: Request):
                             "arguments": event.tool_args,
                         }),
                     }
+                elif event.type == "permission_request":
+                    yield {
+                        "event": "permission_request",
+                        "data": json.dumps({
+                            "message": event.content,
+                            "tool": event.tool_name,
+                            "arguments": event.tool_args,
+                        }),
+                    }
                 elif event.type == "done":
-                    yield {"event": "done", "data": json.dumps({})}
+                    cid = _agent._conversation_id if _agent else None
+                    yield {"event": "done", "data": json.dumps({"conversation_id": cid})}
                 elif event.type == "error":
                     yield {
                         "event": "error",
@@ -347,16 +381,26 @@ async def tools_call(request: Request):
     body = await request.json()
     tool_name = body.get("tool_name")
     tool_args = body.get("tool_args", {})
+    conversation_id = body.get("conversation_id")
 
     if not tool_name:
         return {"error": "No tool_name provided"}
 
     try:
+        # Record the user's intent and the tool call as a conversation turn
+        cid = conversation_id
+        if _agent:
+            if cid is None:
+                cid = _agent.record_turn("user", f"[tool call: {tool_name}]")
+            else:
+                _agent._conversation_id = cid
+            _agent.record_turn("tool", f"{tool_name}: {json.dumps(tool_args)[:200]}")
+
         result = await _mcp_manager.call_tool(tool_name, tool_args)
-        return {"result": result}
+        return {"result": result, "conversation_id": cid}
     except Exception as e:
         logger.error("Tool call failed: %s", e)
-        return {"error": str(e)}
+        return {"error": str(e), "conversation_id": conversation_id}
 
 
 @router.post("/chat/draft")
@@ -373,9 +417,18 @@ async def chat_draft(request: Request):
     brief = body.get("brief", "")
     to = body.get("to", "")
     subject = body.get("subject", "")
+    conversation_id = body.get("conversation_id")
 
     if not brief:
         return {"error": "No brief provided"}
+
+    # Record the draft request as a conversation turn
+    cid = conversation_id
+    if _agent:
+        if cid is None:
+            cid = _agent.record_turn("user", f"Draft email to {to or 'someone'}: {subject or brief[:60]}")
+        else:
+            _agent._conversation_id = cid
 
     # Build a focused prompt for email body generation
     context_parts = []
@@ -421,10 +474,10 @@ async def chat_draft(request: Request):
             cleaned.append(line)
 
         result_body = "\n".join(cleaned).strip()
-        return {"body": result_body}
+        return {"body": result_body, "conversation_id": cid}
     except Exception as e:
         logger.error("Draft generation failed: %s", e)
-        return {"error": str(e)}
+        return {"error": str(e), "conversation_id": cid}
 
 
 @router.get("/models/list")
@@ -654,6 +707,8 @@ async def upgrade_options():
 
 @router.post("/shutdown")
 async def shutdown():
+    from .voice import stt_client
+    await stt_client.stop()
     await _mcp_manager.disconnect_all()
     if _model_loader:
         _model_loader.unload()
@@ -735,5 +790,63 @@ async def set_permission(request: Request):
     granted = body.get("granted", False)
     if not scope:
         return {"error": "No scope provided"}
-    db.set_permission(scope, granted)
-    return {"status": "set", "scope": scope, "granted": granted}
+    # Map tool name to permission scope (e.g. "search_web" -> "browser")
+    _TOOL_TO_SCOPE = {
+        "read_file": "files", "write_file": "files", "list_directory": "files",
+        "move_file": "files", "copy_file": "files", "delete_file": "files",
+        "glob_search": "files", "mkdir": "files", "read_pdf": "files",
+        "preview_organize": "files", "execute_organize": "files",
+        "create_note": "notes", "list_notes": "notes",
+        "search_notes": "notes", "delete_note": "notes",
+        "open_browser": "browser", "search_web": "browser",
+        "fetch_page": "browser", "search_and_fetch": "browser",
+        "draft_email": "email", "open_email_client": "email", "list_drafts": "email",
+        "create_reminder": "reminders", "list_reminders": "reminders", "delete_reminder": "reminders",
+        "voice_transcribe": "microphone",
+    }
+    resolved_scope = _TOOL_TO_SCOPE.get(scope, scope)
+    db.set_permission(resolved_scope, granted)
+    return {"status": "set", "scope": resolved_scope, "granted": granted}
+
+
+# --- Voice endpoints ---
+
+
+@router.post("/voice/transcribe")
+async def voice_transcribe(request: Request):
+    """Transcribe WAV audio to text via faster-whisper STT.
+
+    Expects: {"wav_base64": "..."} (base64-encoded WAV, PCM16, any sample rate)
+    Returns: {"text": "transcribed text"}
+    """
+    from .voice import stt_client
+
+    if not stt_client.is_ready:
+        return {"error": "STT server not ready", "text": ""}
+
+    body = await request.json()
+    wav_b64 = body.get("wav_base64", "")
+    if not wav_b64:
+        return {"error": "No audio data", "text": ""}
+
+    try:
+        import base64
+        wav_bytes = base64.b64decode(wav_b64)
+        text = await stt_client.transcribe(wav_bytes)
+        return {"text": text}
+    except Exception as e:
+        logger.error("Voice transcribe error: %s", e)
+        return {"error": str(e), "text": ""}
+
+
+@router.get("/voice/status")
+async def voice_status():
+    """Check voice subsystem status (STT ready, TTS available, model loaded)."""
+    from .voice import stt_client, tts_manager
+
+    model_status = await stt_client.check_model_status()
+    return {
+        "stt_ready": stt_client.is_ready,
+        "stt_model_loaded": model_status.get("model_loaded", False),
+        "tts_available": tts_manager._available,
+    }

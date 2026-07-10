@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS messages (
   conversation_id INTEGER NOT NULL REFERENCES conversations(id),
   role TEXT NOT NULL,
   content TEXT NOT NULL,
+  tool_name TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -81,6 +82,11 @@ class Database:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
+        # Migration: add tool_name column to messages if missing (existing DBs)
+        try:
+            self._conn.execute("SELECT tool_name FROM messages LIMIT 1")
+        except sqlite3.OperationalError:
+            self._conn.execute("ALTER TABLE messages ADD COLUMN tool_name TEXT")
         self._conn.commit()
         logger.info("Database initialized: %s", self._path)
 
@@ -171,24 +177,24 @@ class Database:
     # Messages
     # ------------------------------------------------------------------
 
-    def add_message(self, conv_id: int, role: str, content: str) -> int:
+    def add_message(self, conv_id: int, role: str, content: str, tool_name: str | None = None) -> int:
         with self._tx() as cur:
             cur.execute(
-                "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-                (conv_id, role, content[:2000], _now()),
+                "INSERT INTO messages (conversation_id, role, content, tool_name, created_at) VALUES (?, ?, ?, ?, ?)",
+                (conv_id, role, content[:2000], tool_name, _now()),
             )
             return cur.lastrowid
 
     def get_messages(self, conv_id: int, limit: int = 50) -> list[dict]:
         with self._tx() as cur:
             cur.execute(
-                "SELECT id, role, content, created_at FROM messages "
+                "SELECT id, role, content, tool_name, created_at FROM messages "
                 "WHERE conversation_id = ? ORDER BY created_at ASC LIMIT ?",
                 (conv_id, limit),
             )
             return [dict(row) for row in cur.fetchall()]
 
-    def get_recent_messages(self, conv_id: int, n: int = 10) -> list[dict]:
+    def get_recent_messages(self, conv_id: int, limit: int = 10) -> list[dict]:
         """Get the last N messages in a conversation (for context window)."""
         with self._tx() as cur:
             cur.execute(
@@ -196,7 +202,7 @@ class Database:
                 "  SELECT id, role, content FROM messages "
                 "  WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?"
                 ") sub ORDER BY id ASC",
-                (conv_id, n),
+                (conv_id, limit),
             )
             return [dict(row) for row in cur.fetchall()]
 

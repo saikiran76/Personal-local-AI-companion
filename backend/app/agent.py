@@ -36,7 +36,9 @@ Before asking the user for information, check if it's already available via list
 For example: if the user asks to plan their day, first call list_notes to see what's already scheduled,
 then ask only about what's missing.
 
-When asked to research, summarize, or look up a topic, use search_and_fetch(query) — it searches the web and returns the first result's content. Only ask for a URL if the user has a specific page in mind (use fetch_page for that)."""
+When asked to research, summarize, or look up a topic, use search_and_fetch(query) — it searches the web and returns the first result's content. Only ask for a URL if the user has a specific page in mind (use fetch_page for that).
+
+If a tool result contains an error, tell the user clearly that the action did NOT complete and why. Never claim success alongside an error — "reminder created but format was wrong" is contradictory and confusing. Say "the reminder could not be created because..." instead."""
 
 MAX_TOOL_ROUNDS = 5
 
@@ -483,6 +485,19 @@ class AgentOrchestrator:
                     tool_name=tool_name,
                     tool_args=tool_args,
                 )
+
+                # Intercept LLM create_reminder calls — route through form, not direct execution.
+                # The LLM has no reliable sense of "now" for computing relative times,
+                # so we always let the user confirm/adjust via the form.
+                if tool_name == "create_reminder":
+                    logger.info("LLM create_reminder intercepted — routing to form")
+                    yield AgentEvent(
+                        type="reminder_form",
+                        content="Let me confirm the details:",
+                        tool_args=tool_args,
+                    )
+                    self._pending_state = {"type": "confirm", "tool_name": tool_name, "tool_args": tool_args}
+                    return
 
                 try:
                     logger.info("Calling mcp.call_tool(%s, %s)", tool_name, tool_args)
@@ -975,6 +990,11 @@ class AgentOrchestrator:
             system = SYSTEM_PROMPT + "\n\n" + tool_descriptions
         else:
             system = SYSTEM_PROMPT
+
+        # Inject current date/time so the model can compute relative times
+        from datetime import datetime
+        now = datetime.now()
+        system += f"\n\nCurrent date and time: {now.strftime('%Y-%m-%d %H:%M')} ({now.strftime('%A')})"
 
         # Inject recent memories for personal context
         memories = db.get_memories(limit=5)
@@ -1489,11 +1509,20 @@ class AgentOrchestrator:
         Returns action dict if detected, None otherwise.
         Fires before model.generate() — zero LLM involvement.
         """
+        # Strip common leading fillers from speech disfluency
+        cleaned = re.sub(
+            r'^\s*(?:buddy|hey|hi|hello|yo|so|but|well|okay|ok|now|right|um|uh|ah|oh|like|hey)\s*[,.:;]?\s*',
+            '', message, flags=re.IGNORECASE,
+        ).strip()
+        if not cleaned:
+            return None
+        msg = cleaned  # use cleaned version for all matching
+
         # List reminders
-        if self._REMINDER_LIST_PATTERNS.search(message):
+        if self._REMINDER_LIST_PATTERNS.search(msg):
             # Check if they want reminders for a specific date
             for pattern in self._DATE_PATTERNS:
-                m = pattern.search(message)
+                m = pattern.search(msg)
                 if m:
                     date_str = self._parse_relative_date(m.group(1))
                     if date_str:
@@ -1501,16 +1530,16 @@ class AgentOrchestrator:
             return {"action": "list"}
 
         # Delete reminder — needs a reminder_id, fall through to LLM for now
-        if self._REMINDER_DELETE_PATTERNS.search(message):
+        if self._REMINDER_DELETE_PATTERNS.search(msg):
             # Can't extract ID from prose — let LLM handle via list + delete
             return None
 
         # Create reminder
-        if self._REMINDER_VERBS.search(message):
+        if self._REMINDER_VERBS.search(msg):
             title = ""
             title_match = re.search(
-                r'(?:remind\s+me\s+(?:to|about|for)?|create\s+a?\s*reminder\s+(?:to|for|about)?|set\s+a?\s*reminder\s+(?:to|for|about)?|add\s+a?\s*reminder\s+(?:to|for|about)?|schedule\s+a?\s*reminder\s+(?:to|for|about)?)\s*(.+?)(?:\s+(?:on|at|by|before|tomorrow|today|next|@\d|in\s+\d+|within\s+\d+)\b|$)',
-                message, re.IGNORECASE,
+                r'(?:remind\s+me\s+(?:to|about|for)?|create\s+a?\s*reminder\s+(?:to|for|about)?|set\s+a?\s*reminder\s+(?:to|for|about)?|add\s+a?\s*reminder\s+(?:to|for|about)?|schedule\s+a?\s*reminder\s+(?:to|for|about)?)\s*(.+?)(?:\s+(?:on|at|by|before|of|tomorrow|today|next|@\d|in\s+\d+|within\s+\d+)\b|$)',
+                msg, re.IGNORECASE,
             )
             if title_match:
                 candidate = title_match.group(1).strip().rstrip(".,")
@@ -1519,18 +1548,30 @@ class AgentOrchestrator:
 
             if not title:
                 fallback_match = re.search(
-                    r'^(.+?)(?:\s+(?:before|after|at|on|by|tomorrow|today|next|@\d|\d+\s*(?:am|pm)|in\s+\d+|within\s+\d+)\b|$)',
-                    message, re.IGNORECASE,
+                    r'^(.+?)(?:\s+(?:before|after|at|on|by|of|tomorrow|today|next|@\d|\d+\s*(?:am|pm)|in\s+\d+|within\s+\d+)\b|$)',
+                    msg, re.IGNORECASE,
                 )
                 if fallback_match:
                     candidate = fallback_match.group(1).strip().rstrip(".,")
                     if candidate and len(candidate) > 2 and not self._TITLE_GARBLED_RE.search(candidate):
                         title = candidate
 
+            # Split-clause recovery: if title is still empty, check for trailing clause
+            # e.g., "So the occasion is There's a meeting" → "There's a meeting"
+            if not title:
+                clause_match = re.search(
+                    r'(?:the\s+occasion\s+is|it\'?s?\s+about|regarding|concerning|subject\s+(?:is|:))\s*(.+?)(?:\s+(?:on|at|by|before|of|tomorrow|today|next|@\d|in\s+\d+|within\s+\d+)\b|$)',
+                    msg, re.IGNORECASE,
+                )
+                if clause_match:
+                    candidate = clause_match.group(1).strip().rstrip(".,")
+                    if candidate and len(candidate) > 2 and not self._TITLE_GARBLED_RE.search(candidate):
+                        title = candidate
+
             # Extract date (confident only)
             due_date = None
             for pattern in self._DATE_PATTERNS:
-                m = pattern.search(message)
+                m = pattern.search(msg)
                 if m:
                     parsed = self._parse_relative_date(m.group(1))
                     if parsed:
@@ -1543,7 +1584,7 @@ class AgentOrchestrator:
             due_time = None
             relative_match = re.search(
                 r'\b(?:in|within|of)\s+([\d]+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty)\s+(minutes?|mins?|hours?|hrs?)\b',
-                message, re.IGNORECASE,
+                msg, re.IGNORECASE,
             )
             if relative_match:
                 raw_amount = relative_match.group(1)
@@ -1568,7 +1609,7 @@ class AgentOrchestrator:
             else:
                 # Try explicit time patterns
                 for pattern in self._TIME_PATTERNS:
-                    m = pattern.search(message)
+                    m = pattern.search(msg)
                     if m:
                         parsed = self._parse_relative_time(m.group(1))
                         if parsed:
@@ -1637,6 +1678,20 @@ class AgentOrchestrator:
             title = intent["title"]
             due_date = intent["due_date"]
             due_time = intent.get("due_time")
+
+            # If title is empty, route through the form — don't create with blank title
+            if not title:
+                logger.info("Reminder intent has no title — routing to form")
+                tool_args = {"due_date": due_date}
+                if due_time:
+                    tool_args["due_time"] = due_time
+                yield AgentEvent(
+                    type="reminder_form",
+                    content="What should the reminder be about?",
+                    tool_args=tool_args,
+                )
+                self._pending_state = {"type": "confirm", "tool_name": "create_reminder", "tool_args": tool_args}
+                return
 
             tool_args = {"title": title, "due_date": due_date}
             if due_time:

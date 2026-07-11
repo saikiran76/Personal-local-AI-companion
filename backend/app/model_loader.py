@@ -14,6 +14,7 @@ import gc
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from enum import Enum
@@ -468,7 +469,13 @@ class ModelLoader:
         resolved_path = await self._resolve_path(model_name, model_path)
         self._info.model_path = str(resolved_path)
 
-        _, _, ctx_size, ram_req = GGUF_REGISTRY.get(model_name, ("", "", 4096, 3000))
+        # Estimate RAM requirement: use registry if available, otherwise use file size * 1.3
+        # (GGUF files are ~75-85% weights; memory mapping needs overhead)
+        _, _, ctx_size, ram_req = GGUF_REGISTRY.get(model_name, ("", "", 4096, 0))
+        if ram_req == 0:
+            file_size_mb = resolved_path.stat().st_size / (1024 * 1024)
+            ram_req = int(file_size_mb * 1.3)
+            logger.info("RAM estimate from file size: %.0f MB * 1.3 = %d MB", file_size_mb, ram_req)
 
         # --- GPU allocation ---
         device = comp["device"]
@@ -544,6 +551,13 @@ class ModelLoader:
         if model_path:
             p = Path(model_path)
             if p.exists():
+                # Reject split GGUF files (e.g., model-00001-of-00002.gguf)
+                if re.search(r'-\d{4,}-of-\d{4,}\.gguf$', p.name, re.IGNORECASE):
+                    raise ValueError(
+                        f"Split GGUF file detected: {p.name}. "
+                        "Split model files are not supported — merge all parts into a single .gguf file first. "
+                        "You can use: gguf-split --merge <first-part.gguf> <output-dir>"
+                    )
                 return p
             raise FileNotFoundError(f"Model file not found: {model_path}")
 
@@ -572,8 +586,10 @@ class ModelLoader:
                     return fpath
 
         # Scan models directory for any .gguf files (imported models)
+        # Exclude split files (e.g., model-00001-of-00002.gguf)
         local_models = sorted(
-            self._model_dir.glob("*.gguf"),
+            (f for f in self._model_dir.glob("*.gguf")
+             if not re.search(r'-\d{4,}-of-\d{4,}\.gguf$', f.name, re.IGNORECASE)),
             key=lambda f: f.stat().st_size,
             reverse=True,  # prefer largest
         )

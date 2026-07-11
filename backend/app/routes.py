@@ -201,8 +201,10 @@ async def events(request: Request):
                 "data": json.dumps({"error": f"Unexpected status: {model_info.status}"}),
             }
 
-        # Initialize agent if not already done
-        if _agent is None:
+        # Initialize agent only when a real model is available
+        # When model fails to load (is_mock=True), skip initialization —
+        # the agent needs a real model for GBNF grammar and tool calls.
+        if _agent is None and not model_info.is_mock:
             _agent = AgentOrchestrator(_model_loader, _mcp_manager)
             await _agent.initialize()
 
@@ -248,7 +250,7 @@ async def chat(request: Request):
         return {"error": "No message provided"}
 
     if _agent is None:
-        return {"error": "Agent not initialized. Wait for backend_ready event."}
+        return {"error": "No model loaded. Import a .gguf model file to start chatting."}
 
     # If resuming an existing conversation, load its history into the agent
     if conversation_id and _agent._conversation_id != conversation_id:

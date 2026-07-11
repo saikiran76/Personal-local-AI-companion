@@ -4,6 +4,7 @@ import { X, CheckCircle, File, Upload, Folder } from 'lucide-react';
 const BACKEND_URL = 'http://127.0.0.1:8765';
 
 const ACCEPTED_TYPES = ['.gguf'];
+const SPLIT_GGUF_RE = /-\d{4,}-of-\d{4,}\.gguf$/i;
 
 function formatSize(mb) {
   if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
@@ -29,6 +30,10 @@ export default function ImportModelModal({ onClose, onImported }) {
     setError('');
     if (!isValidFile(file)) {
       setError('Please select a .gguf model file');
+      return;
+    }
+    if (SPLIT_GGUF_RE.test(file.name)) {
+      setError('Split GGUF shards are not supported. Select a merged .gguf file.');
       return;
     }
     setSelectedFile({
@@ -78,6 +83,10 @@ export default function ImportModelModal({ onClose, onImported }) {
 
         if (result.success && result.selected?.length > 0) {
           const selected = result.selected[0];
+          if (SPLIT_GGUF_RE.test(selected.fileName)) {
+            setError('Split GGUF shards are not supported. Select a merged .gguf file.');
+            return;
+          }
           setSelectedFile({
             name: selected.fileName,
             size: selected.sizeBytes || 0,

@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -27,6 +28,10 @@ _model_loader: ModelLoader | None = None
 _mcp_manager = MCPClientManager()
 _agent: AgentOrchestrator | None = None
 _pending_model_path: str | None = None  # set by import to trigger reload on next connect
+
+
+def _is_split_gguf(path_or_name: str | Path) -> bool:
+    return re.search(r'-\d{4,}-of-\d{4,}\.gguf$', Path(path_or_name).name, re.IGNORECASE) is not None
 
 
 @router.get("/health")
@@ -127,9 +132,8 @@ async def events(request: Request):
                 model_info = await _model_loader.load(model_name, model_path)
             else:
                 model_info = _model_loader.info
-                model_info.status = ModelStatus.READY
-                model_info.is_mock = True
-                model_info.quantization = "mock"
+                model_info.status = ModelStatus.ERROR
+                model_info.error = "Only local GGUF model loading is currently supported."
 
             # Clear pending switch after load attempt
             _pending_model_path = None
@@ -165,27 +169,24 @@ async def events(request: Request):
                     }),
                 }
         elif model_info.status == ModelStatus.ERROR:
-            logger.warning("Model load failed, falling back to mock mode: %s", model_info.error)
-            model_info.status = ModelStatus.READY
-            model_info.is_mock = True
-            model_info.quantization = "mock"
+            logger.warning("Model load failed: %s", model_info.error)
 
             yield {
-                "event": "model_ready",
+                "event": "model_error",
                 "data": json.dumps({
+                    "error": model_info.error,
                     "model": model_info.name,
                     "device": model_info.device,
                     "device_name": model_info.device_name,
                     "tier": model_info.tier,
                     "load_time_ms": 0,
-                    "model_path": None,
-                    "quantization": "mock",
+                    "model_path": model_info.model_path,
+                    "quantization": model_info.quantization,
                     "vram_mb": model_info.vram_mb,
                     "ram_mb": model_info.ram_mb,
                     "n_gpu_layers": 0,
                     "n_threads": model_info.n_threads,
                     "model_available": False,
-                    "load_error": model_info.error,
                 }),
             }
             yield {
@@ -537,6 +538,15 @@ async def import_model(file: UploadFile = File(...)):
     if not file.filename or not file.filename.endswith(".gguf"):
         return {"error": "Only .gguf files are supported", "success": False}
 
+    if _is_split_gguf(file.filename):
+        return {
+            "error": (
+                "Split GGUF files are not supported. Select a merged .gguf file, "
+                "or merge all parts first with gguf-split."
+            ),
+            "success": False,
+        }
+
     models_dir = Path(DEFAULT_MODEL_DIR)
     models_dir.mkdir(parents=True, exist_ok=True)
     dest_path = models_dir / file.filename
@@ -644,12 +654,23 @@ async def switch_model(request: Request):
             if not dest_path.exists():
                 # Scan for partial match
                 for f in models_dir.glob("*.gguf"):
+                    if _is_split_gguf(f):
+                        continue
                     if model_name.lower() in f.stem.lower():
                         dest_path = f
                         break
 
     if not dest_path.exists():
         return {"error": f"Model file not found: {dest_path}", "success": False}
+
+    if _is_split_gguf(dest_path):
+        return {
+            "error": (
+                "Split GGUF files are not supported. Select a merged .gguf file, "
+                "or merge all parts first with gguf-split."
+            ),
+            "success": False,
+        }
 
     # Unload current model
     if _model_loader is not None and _model_loader.is_ready:

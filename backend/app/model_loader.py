@@ -35,11 +35,17 @@ try:
     LLAMA_CPP_AVAILABLE = True
 except ImportError:
     LLAMA_CPP_AVAILABLE = False
+    LlamaModel = None
     LlamaGrammar = None
-    logger.info(
-        "llama-cpp-python not installed — using mock mode. "
-        "Install with: uv pip install llama-cpp-python"
+    logger.warning(
+        "llama-cpp-python not installed. Install it to load GGUF models."
     )
+
+ALLOW_MOCK_MODEL = os.environ.get("DESKTOP_COMPANION_ALLOW_MOCK_MODEL", "").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 try:
     import psutil
@@ -403,8 +409,11 @@ class ModelLoader:
                 resolved = self._resolve_model_name(model_name)
                 self._info.name = resolved
 
-                # Check if llama-cpp-python is available
-                if not LLAMA_CPP_AVAILABLE and not model_path:
+                if not LLAMA_CPP_AVAILABLE:
+                    if not ALLOW_MOCK_MODEL:
+                        raise RuntimeError(
+                            "llama-cpp-python is not installed. Install it to load GGUF models."
+                        )
                     await self._load_mock(resolved)
                 else:
                     await self._load_gguf(resolved, model_path, comp)
@@ -421,8 +430,6 @@ class ModelLoader:
             except Exception as e:
                 self._info.status = ModelStatus.ERROR
                 self._info.error = str(e)
-                self._info.is_mock = True
-                self._info.quantization = "mock"
                 logger.error("Load failed: %s", e, exc_info=True)
 
             return self._info
@@ -452,9 +459,11 @@ class ModelLoader:
         if LLAMA_CPP_AVAILABLE and self._model is not None:
             async for token in self._generate_stream(messages, max_tokens, temperature, stop, grammar):
                 yield token
-        else:
+        elif ALLOW_MOCK_MODEL:
             async for token in self._generate_mock():
                 yield token
+        else:
+            yield json.dumps({"error": "No real model is loaded"})
 
     # -------------------------------------------------------------------
     # GGUF loading
@@ -629,9 +638,17 @@ class ModelLoader:
         if name in GGUF_REGISTRY:
             return name
 
+        if re.search(r'-\d{4,}-of-\d{4,}(?:\.gguf)?$', name, re.IGNORECASE):
+            raise ValueError(
+                f"Split GGUF file detected: {name}. Merge all parts into a single .gguf file first."
+            )
+
         # Check if there are local .gguf files first — always prefer local
         local_models = sorted(
-            self._model_dir.glob("*.gguf"),
+            (
+                f for f in self._model_dir.glob("*.gguf")
+                if not re.search(r'-\d{4,}-of-\d{4,}\.gguf$', f.name, re.IGNORECASE)
+            ),
             key=lambda f: f.stat().st_size,
             reverse=True,
         )

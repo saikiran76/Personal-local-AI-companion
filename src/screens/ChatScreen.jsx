@@ -401,7 +401,7 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
       const available = data.model_available !== false;
       setModelAvailable(available);
       onModelAvailable?.(available);
-      setStatusMessage('');
+      setStatusMessage(available ? '' : 'Model is not loaded. Import a valid merged .gguf model to enable AI.');
       console.log('Backend ready, tools:', data.tools, 'model_available:', data.model_available);
 
       fetch(`${BACKEND_URL}/models/advise`)
@@ -416,6 +416,8 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
 
     eventSource.addEventListener('model_error', (e) => {
       const data = JSON.parse(e.data);
+      setBackendStatus(BACKEND.ERROR);
+      onBackendStatus?.(BACKEND.ERROR);
       setModelAvailable(false);
       onModelAvailable?.(false);
       setStatusMessage(`Model error: ${data.error}`);
@@ -424,6 +426,7 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
     eventSource.addEventListener('model_missing', (e) => {
       const data = JSON.parse(e.data);
       setModelAvailable(false);
+      onModelAvailable?.(false);
       setStatusMessage(data.message || 'No model file found. Import a .gguf model to enable AI.');
     });
 
@@ -1645,8 +1648,10 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
             </div>
             <div className="chat-input-footer">
               <span className="chat-input-hint">
-                {backendStatus === BACKEND.READY
+                {backendStatus === BACKEND.READY && modelAvailable
                   ? `${assistantName} runs locally via ${modelInfo?.model || 'LLM'}. Press Enter to send.`
+                  : backendStatus === BACKEND.READY
+                  ? 'Import a valid merged .gguf model to enable local AI.'
                   : `${assistantName} in preview mode — start the Python backend for full capabilities.`
                 }
               </span>

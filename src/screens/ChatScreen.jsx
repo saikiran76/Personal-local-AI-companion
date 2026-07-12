@@ -324,6 +324,7 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
   const pendingClarifyRef = useRef(null);
   const pendingConfirmRef = useRef(null);
   const pendingPermissionRef = useRef(null);
+  const permissionBusyRef = useRef(false);  // synchronously blocks double-clicks
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
   const eventSourceRef = useRef(null);
@@ -499,6 +500,7 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
 
     const hadClarify = pendingClarifyRef.current;
     const hadConfirm = pendingConfirmRef.current;
+    const hadPermission = pendingPermissionRef.current;
 
     const userMsg = {
       id: Date.now(),
@@ -520,7 +522,7 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
     pendingConfirmRef.current = null;
     pendingPermissionRef.current = null;
 
-    if (isResponse && (hadClarify || hadConfirm)) {
+    if (isResponse && (hadClarify || hadConfirm || hadPermission)) {
       await streamFromBackend(trimmed, trimmed);
       return;
     }
@@ -536,18 +538,26 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
 
   /* ---- SSE stream from backend ---- */
 
-  const streamFromBackend = async (message, response = null) => {
-    const assistantMsg = {
-      id: Date.now() + 1,
-      role: 'assistant',
-      content: '',
-      toolCalls: [],
-      timestamp: new Date(),
-      isThinking: true,
-    };
-
-    assistantMsgIdRef.current = assistantMsg.id;
-    setMessages((prev) => [...prev, assistantMsg]);
+  const streamFromBackend = async (message, response = null, resumeMessageId = null) => {
+    let targetId;
+    if (resumeMessageId) {
+      // Resume existing assistant message (e.g., after permission grant)
+      targetId = resumeMessageId;
+      assistantMsgIdRef.current = resumeMessageId;
+    } else {
+      // Create new assistant message
+      const assistantMsg = {
+        id: Date.now() + 1,
+        role: 'assistant',
+        content: '',
+        toolCalls: [],
+        timestamp: new Date(),
+        isThinking: true,
+      };
+      targetId = assistantMsg.id;
+      assistantMsgIdRef.current = assistantMsg.id;
+      setMessages((prev) => [...prev, assistantMsg]);
+    }
 
     try {
       const controller = new AbortController();
@@ -716,6 +726,7 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                   toolName: pToolName,
                   toolArgs: pToolArgs,
                   originalMessage: lastUserMsg,
+                  assistantMessageId: targetId,
                 });
                 pendingPermissionRef.current = {
                   message: event.data.message,
@@ -723,6 +734,7 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                   toolName: pToolName,
                   toolArgs: pToolArgs,
                   originalMessage: lastUserMsg,
+                  assistantMessageId: targetId,
                 };
                 updateMessage(targetId, (msg) => {
                   msg.isThinking = false;
@@ -1515,7 +1527,10 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                   <div className="confirm-actions">
                     <button
                       className="confirm-btn confirm-yes"
+                      disabled={permissionBusyRef.current}
                       onClick={async () => {
+                        if (permissionBusyRef.current) return;
+                        permissionBusyRef.current = true;
                         const pp = pendingPermission;
                         console.log('[Permission] Allow clicked, pp:', JSON.stringify(pp));
                         setPendingPermission(null);
@@ -1527,21 +1542,27 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                             body: JSON.stringify({ scope: pp.scope, granted: true }),
                           });
                           console.log('[Permission] POST /permissions status:', res.status);
-                          // Re-send original message to retry the tool call
+                          // Replay the original message with response="yes" to resume the pending tool call
                           if (pp.originalMessage) {
-                            console.log('[Permission] Re-sending message:', pp.originalMessage.slice(0, 50));
-                            await streamFromBackend(pp.originalMessage);
+                            console.log('[Permission] Replaying with response=yes:', pp.originalMessage.slice(0, 50));
+                            setIsStreaming(true);
+                            streamingRef.current = true;
+                            await streamFromBackend(pp.originalMessage, 'yes', pp.assistantMessageId);
                           } else {
-                            console.log('[Permission] No originalMessage to re-send!');
+                            console.log('[Permission] No originalMessage to replay!');
                           }
                         } catch (e) { console.log('[Permission] Error:', e); }
+                        finally { permissionBusyRef.current = false; }
                       }}
                     >
                       Allow
                     </button>
                     <button
                       className="confirm-btn confirm-no"
+                      disabled={permissionBusyRef.current}
                       onClick={() => {
+                        if (permissionBusyRef.current) return;
+                        permissionBusyRef.current = true;
                         const pp = pendingPermission;
                         setPendingPermission(null);
                         pendingPermissionRef.current = null;
@@ -1553,6 +1574,8 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                         }]);
                         setIsStreaming(false);
                         streamingRef.current = false;
+                        setIsThinking(false);
+                        permissionBusyRef.current = false;
                       }}
                     >
                       Deny

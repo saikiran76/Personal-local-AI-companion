@@ -47,10 +47,21 @@ class STTClient:
         self._process: subprocess.Popen | None = None
         self._request_id = 0
         self._lock = threading.Lock()
+        self._start_lock = asyncio.Lock()
         self._ready = False
 
     async def start(self):
         """Spawn voice_stt.exe subprocess."""
+        async with self._start_lock:
+            if self.is_ready:
+                return
+            if self._process is not None and self._process.poll() is None:
+                return
+
+            await self._start_process()
+
+    async def _start_process(self):
+        """Spawn voice_stt.exe subprocess once start() has acquired the lock."""
         if getattr(sys, 'frozen', False):
             # Frozen mode — look for voice_stt.exe next to backend.exe
             backend_dir = Path(sys.executable).parent

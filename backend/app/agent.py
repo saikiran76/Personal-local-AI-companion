@@ -19,9 +19,7 @@ Always prioritize user privacy — all processing happens locally.
 Be concise, helpful, and proactive. Use tools when they would help accomplish the task.
 Attempt a tool call even with partial information — the system will ask the user for anything missing.
 
-CRITICAL: You do NOT have internet access yourself. If the user asks about current events, news,
-trending topics, or anything requiring up-to-date information, you MUST call search_and_fetch(query)
-or search_web(query). You cannot answer these from your training data.
+CRITICAL: You do NOT have internet access yourself. Use search_and_fetch(query) ONLY for information that could have changed recently — news, prices, current office-holders, weather, recent events, live scores. For stable historical facts, people, well-established knowledge, or anything in your training data, answer directly with final_answer. Do NOT search for things like "who is [person]", "what is [concept]", "when did [historical event] happen" — you already know these.
 
 CRITICAL: Use final_answer ONLY when you can answer from your own knowledge. Do NOT use final_answer
 to say you cannot do something — instead, call the appropriate tool. If the user asks you to do
@@ -153,6 +151,11 @@ class AgentOrchestrator:
 
             elif pending["type"] == "confirm":
                 async for event in self._handle_confirm_resume(pending, user_response):
+                    yield event
+                return
+
+            elif pending["type"] == "permission":
+                async for event in self._handle_permission_resume(pending, user_response):
                     yield event
                 return
 
@@ -441,18 +444,7 @@ class AgentOrchestrator:
                 # --- Permission gate: check scope before executing ---
                 scope = self._tool_scope(tool_name)
                 if scope != "other" and not db.get_permission(scope):
-                    self._pending_state = {
-                        "type": "confirm",
-                        "tool_name": tool_name,
-                        "tool_args": tool_args,
-                        "permission_scope": scope,
-                    }
-                    yield AgentEvent(
-                        type="permission_request",
-                        content=f"Luna wants to access your **{scope}**. Allow?",
-                        tool_name=tool_name,
-                        tool_args=tool_args,
-                    )
+                    yield self._request_permission(scope, tool_name, tool_args)
                     yield AgentEvent(type="done", content="", done=True)
                     return
 
@@ -659,18 +651,7 @@ class AgentOrchestrator:
         # Permission gate
         scope = self._tool_scope(tool_name)
         if scope != "other" and not db.get_permission(scope):
-            self._pending_state = {
-                "type": "confirm",
-                "tool_name": tool_name,
-                "tool_args": tool_args,
-                "permission_scope": scope,
-            }
-            yield AgentEvent(
-                type="permission_request",
-                content=f"Luna wants to access your **{scope}**. Allow?",
-                tool_name=tool_name,
-                tool_args=tool_args,
-            )
+            yield self._request_permission(scope, tool_name, tool_args)
             return
 
         # Execute
@@ -719,13 +700,56 @@ class AgentOrchestrator:
             async for event in self._final_response_round():
                 yield event
 
+    def _request_permission(self, scope: str, tool_name: str, tool_args: dict) -> AgentEvent:
+        self._pending_state = {
+            "type": "permission",
+            "scope": scope,
+            "tool_name": tool_name,
+            "tool_args": tool_args,
+        }
+        event_args = dict(tool_args)
+        event_args["scope"] = scope
+        return AgentEvent(
+            type="permission_request",
+            content=f"Luna wants to access your **{scope}**. Allow?",
+            tool_name=tool_name,
+            tool_args=event_args,
+        )
+
+    async def _handle_permission_resume(
+        self, pending: dict, user_response: str
+    ) -> AsyncIterator[AgentEvent]:
+        """Persist a permission decision, then replay the exact blocked tool call."""
+        scope = pending["scope"]
+        answer = user_response.strip().lower()
+        if answer not in ("yes", "y", "confirm", "ok", "sure", "do it", "go", "allow", "allowed"):
+            db.set_permission(scope, False)
+            logger.info("Permission denied: %s", scope)
+            yield AgentEvent(
+                type="token",
+                content=f"Okay, I did not access **{scope}** and nothing was changed.",
+            )
+            yield AgentEvent(type="done", content="", done=True)
+            return
+
+        db.set_permission(scope, True)
+        logger.info("Permission granted: %s", scope)
+        db.log_activity(scope, "permission", f"User granted {scope} access")
+
+        replay = {
+            "type": "confirm",
+            "tool_name": pending["tool_name"],
+            "tool_args": pending["tool_args"],
+        }
+        async for event in self._handle_confirm_resume(replay, "yes"):
+            yield event
+
     async def _handle_confirm_resume(
         self, pending: dict, user_response: str
     ) -> AsyncIterator[AgentEvent]:
-        """Handle user's yes/no confirmation or permission grant."""
+        """Handle user's yes/no confirmation."""
         tool_name = pending["tool_name"]
         tool_args = pending["tool_args"]
-        permission_scope = pending.get("permission_scope")
 
         answer = user_response.strip().lower()
         if answer not in ("yes", "y", "confirm", "ok", "sure", "do it", "go"):
@@ -735,12 +759,6 @@ class AgentOrchestrator:
             )
             yield AgentEvent(type="done", content="", done=True)
             return
-
-        # If this was a permission request, persist the grant
-        if permission_scope:
-            db.set_permission(permission_scope, True)
-            logger.info("Permission granted: %s", permission_scope)
-            db.log_activity(permission_scope, "permission", f"User granted {permission_scope} access")
 
         # Execute
         yield AgentEvent(
@@ -1759,6 +1777,11 @@ class AgentOrchestrator:
 
     def _tool_scope(self, tool_name: str) -> str:
         return self._TOOL_SCOPES.get(tool_name, "other")
+
+    @classmethod
+    def _tool_scope_static(cls, tool_name: str) -> str:
+        """Static version for use outside agent instances (e.g., /tools/call)."""
+        return cls._TOOL_SCOPES.get(tool_name, "other")
 
     def new_conversation(self):
         """Start a fresh conversation — saves the old one, resets state."""

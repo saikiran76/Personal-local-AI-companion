@@ -98,6 +98,12 @@ async def events(request: Request):
             "data": json.dumps({"message": "Backend connected"}),
         }
 
+        # Start STT immediately so voice warm-up overlaps model and MCP initialization.
+        from .voice import stt_client
+        stt_task = None
+        if not stt_client.is_ready:
+            stt_task = asyncio.create_task(stt_client.start())
+
         # --- Check if a model switch was requested by the import endpoint ---
         needs_reload = False
         if _pending_model_path is not None:
@@ -209,10 +215,8 @@ async def events(request: Request):
             _agent = AgentOrchestrator(_model_loader, _mcp_manager)
             await _agent.initialize()
 
-        # Start STT server in background (non-blocking)
-        from .voice import stt_client
-        if not stt_client.is_ready:
-            asyncio.create_task(stt_client.start())
+        if stt_task is not None and not stt_task.done():
+            logger.info("STT still loading in background")
 
         yield {
             "event": "backend_ready",
@@ -388,6 +392,16 @@ async def tools_call(request: Request):
 
     if not tool_name:
         return {"error": "No tool_name provided"}
+
+    # NOTE: /tools/call is user-initiated (compose form, email buttons, etc.)
+    # Permission checks only apply to agent-initiated tool calls (handled in agent.py).
+    # No permission gate here — the user explicitly clicked the action.
+    # However, record the grant so the Privacy Dashboard reflects reality.
+    from .agent import AgentOrchestrator
+    scope = AgentOrchestrator._tool_scope_static(tool_name)
+    if scope and not db.get_permission(scope):
+        db.set_permission(scope, True)
+        logger.info("Permission auto-granted via /tools/call: %s", scope)
 
     try:
         # Record the user's intent and the tool call as a conversation turn

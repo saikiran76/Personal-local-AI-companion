@@ -440,6 +440,11 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
       setStatusMessage(data.message || 'No model file found. Import a .gguf model to enable AI.');
     });
 
+    eventSource.addEventListener('stt_ready', () => {
+      setSttReady(true);
+      console.log('[STT] Ready (pushed via SSE)');
+    });
+
     eventSource.addEventListener('ping', () => {});
 
     eventSource.onerror = () => {

@@ -50,8 +50,8 @@
         "to": "backend.exe"
       },
       {
-        "from": "backend/dist/voice_stt.exe",
-        "to": "voice_stt.exe"
+        "from": "backend/dist/voice_stt",
+        "to": "voice_stt"
       }
     ],
     "win": {

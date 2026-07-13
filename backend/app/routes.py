@@ -228,6 +228,10 @@ async def events(request: Request):
             }),
         }
 
+        # Push stt_ready immediately if already loaded, otherwise frontend polls /voice/status
+        if stt_client.is_ready:
+            yield {"event": "stt_ready", "data": json.dumps({"ready": True})}
+
         try:
             while True:
                 await asyncio.sleep(15)

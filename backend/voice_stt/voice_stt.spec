@@ -1,8 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec for Voice STT server.
+PyInstaller spec for Voice STT server — ONEDIR build.
 
-Produces a standalone voice_stt.exe containing faster-whisper + ctranslate2.
+Produces a voice_stt/ folder containing voice_stt.exe + dependencies.
+Onedir launches near-instantly (no temp extraction on every run).
 Spawned by the main backend.exe as a subprocess via stdio JSON-RPC.
 """
 
@@ -54,17 +55,13 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='voice_stt',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
     console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -72,4 +69,15 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='voice_stt',
 )

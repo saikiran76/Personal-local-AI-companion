@@ -37,6 +37,8 @@ def _ensure_model():
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
+        # Skip HuggingFace API check — model is already cached locally
+        os.environ["HF_HUB_OFFLINE"] = "1"
         from faster_whisper import WhisperModel
 
         logger.info("Loading STT model: %s", _model_name)
@@ -45,6 +47,7 @@ def _ensure_model():
             device="cpu",
             compute_type="int8",
             download_root=str(MODEL_DIR),
+            local_files_only=True,
         )
         logger.info("STT model loaded successfully")
         return _model

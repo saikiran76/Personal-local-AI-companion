@@ -63,11 +63,15 @@ class STTClient:
     async def _start_process(self):
         """Spawn voice_stt.exe subprocess once start() has acquired the lock."""
         if getattr(sys, 'frozen', False):
-            # Frozen mode — look for voice_stt.exe next to backend.exe
+            # Frozen mode — look for voice_stt.exe next to backend.exe or in voice_stt/ subfolder
             backend_dir = Path(sys.executable).parent
             stt_exe = backend_dir / "voice_stt.exe"
             if not stt_exe.exists():
-                logger.warning("voice_stt.exe not found at %s", stt_exe)
+                # Try onedir layout: voice_stt/voice_stt.exe
+                stt_exe = backend_dir / "voice_stt" / "voice_stt.exe"
+            if not stt_exe.exists():
+                logger.warning("voice_stt.exe not found at %s or %s",
+                               backend_dir / "voice_stt.exe", backend_dir / "voice_stt" / "voice_stt.exe")
                 return
             command = str(stt_exe)
             args = []

@@ -564,6 +564,27 @@
 }
 
 /* --- Chat Input --- */
+/* --- Cancel Button --- */
+.cancel-btn {
+  display: block;
+  width: 100%;
+  padding: 8px 16px;
+  margin-bottom: 8px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  border-radius: var(--rounded-lg);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.cancel-btn:hover {
+  background: var(--red-500);
+  color: white;
+  border-color: var(--red-500);
+}
+
 .chat-input-area {
   padding: var(--spacing-md) var(--spacing-lg) var(--spacing-lg);
   background: var(--color-canvas);

@@ -59,7 +59,7 @@ _CONFIRMATION_TOOLS = {"delete_file", "move_file", "execute_organize", "draft_em
 @dataclass
 class AgentEvent:
     """Events streamed from the agent to the client."""
-    type: str  # token | clear | tool_call | tool_result | thinking | error | done | clarify | confirm | compose_form | reminder_form | permission_request | status | perf_tip
+    type: str  # token | clear | tool_call | tool_result | thinking | error | done | clarify | confirm | compose_form | reminder_form | permission_request | status | perf_tip | audio | cancelled
     content: str = ""
     tool_name: str = ""
     tool_args: dict = field(default_factory=dict)
@@ -112,6 +112,12 @@ class AgentOrchestrator:
         self._tool_grammar = None  # GBNF grammar for structured tool calls
         self._perf_tip_shown = False  # One-time slowness tip per session
         self._last_tool_call: tuple | None = None  # Duplicate tool call guard
+        self._cancel_requested = False  # Set by POST /chat/cancel to stop generation
+
+    def cancel(self):
+        """Request cancellation of the current generation."""
+        self._cancel_requested = True
+        logger.info("Cancellation requested")
 
     def record_turn(self, role: str, content: str, tool_name: str = "", conversation_id: int | None = None) -> int:
         """Shared persistence helper — creates conversation if needed, saves message.
@@ -296,6 +302,11 @@ class AgentOrchestrator:
             full_response = ""
             token_buffer = []
             async for token in self.model.generate(messages=messages, max_tokens=512):
+                if self._cancel_requested:
+                    self._cancel_requested = False
+                    yield AgentEvent(type="token", content="\n\n(Generation stopped)")
+                    yield AgentEvent(type="done", content="", done=True)
+                    return
                 if token.startswith("{") and "finish_reason" in token:
                     continue
                 full_response += token
@@ -344,6 +355,11 @@ class AgentOrchestrator:
             import time as _time
             round_start = _time.monotonic()
             async for token in self.model.generate(messages=messages, max_tokens=512, grammar=grammar):
+                if self._cancel_requested:
+                    self._cancel_requested = False
+                    yield AgentEvent(type="token", content="\n\n(Generation stopped)")
+                    yield AgentEvent(type="done", content="", done=True)
+                    return
                 if token.startswith("{") and "finish_reason" in token:
                     continue
                 full_response += token
@@ -818,6 +834,11 @@ class AgentOrchestrator:
         sentence_buffer = []
 
         async for token in self.model.generate(messages=messages, max_tokens=768):
+            if self._cancel_requested:
+                self._cancel_requested = False
+                yield AgentEvent(type="token", content="\n\n(Generation stopped)")
+                yield AgentEvent(type="done", content="", done=True)
+                return
             if token.startswith("{") and "finish_reason" in token:
                 continue
             full_response += token
@@ -994,6 +1015,11 @@ class AgentOrchestrator:
     async def _stream_without_tools(self) -> AsyncIterator[AgentEvent]:
         messages = self._build_messages()
         async for token in self.model.generate(messages=messages, max_tokens=512):
+            if self._cancel_requested:
+                self._cancel_requested = False
+                yield AgentEvent(type="token", content="\n\n(Generation stopped)")
+                yield AgentEvent(type="done", content="", done=True)
+                return
             if token.startswith("{") and "finish_reason" in token:
                 continue
             yield AgentEvent(type="token", content=token)

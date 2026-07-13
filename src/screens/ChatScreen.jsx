@@ -26,6 +26,7 @@ function getAssistantInitial(name) {
 const BACKEND = {
   DISCONNECTED: 'disconnected',
   CONNECTING: 'connecting',
+  RECONNECTING: 'reconnecting',
   MODEL_LOADING: 'model_loading',
   READY: 'ready',
   ERROR: 'error',
@@ -316,15 +317,19 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
   const [isThinking, setIsThinking] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [modelAdvisor, setModelAdvisor] = useState(null);
+  const [latencyTier, setLatencyTier] = useState(null);
   const [pendingClarify, setPendingClarify] = useState(null);
   const [pendingConfirm, setPendingConfirm] = useState(null);
   const [pendingPermission, setPendingPermission] = useState(null);
+  const [showCancel, setShowCancel] = useState(false);
+  const [sttReady, setSttReady] = useState(false);
   const [conversations, setConversations] = useState([]);
   const [activeConversationId, setActiveConversationId] = useState(null);
   const pendingClarifyRef = useRef(null);
   const pendingConfirmRef = useRef(null);
   const pendingPermissionRef = useRef(null);
   const permissionBusyRef = useRef(false);  // synchronously blocks double-clicks
+  const cancelTimerRef = useRef(null);  // 15s delay before showing Cancel button
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
   const eventSourceRef = useRef(null);
@@ -374,6 +379,7 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
     eventSourceRef.current = eventSource;
 
     eventSource.addEventListener('connected', () => {
+      setBackendStatus(BACKEND.CONNECTING);
       setStatusMessage('Connected. Initializing...');
     });
 
@@ -411,6 +417,9 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
           if (data.upgrade) {
             setModelAdvisor(data.upgrade);
           }
+          if (data.latency_tier) {
+            setLatencyTier(data.latency_tier);
+          }
         })
         .catch(() => {});
     });
@@ -434,12 +443,34 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
     eventSource.addEventListener('ping', () => {});
 
     eventSource.onerror = () => {
-      setBackendStatus(BACKEND.DISCONNECTED);
-      onBackendStatus?.(BACKEND.DISCONNECTED);
-      setStatusMessage('Backend not available. Using local mode.');
+      // EventSource auto-retries the transport — just keep the UI honest
+      if (backendStatus === BACKEND.READY) {
+        setBackendStatus(BACKEND.RECONNECTING);
+        setStatusMessage('Reconnecting to backend...');
+      } else if (backendStatus !== BACKEND.RECONNECTING) {
+        setBackendStatus(BACKEND.DISCONNECTED);
+        setStatusMessage('Backend not available. Using local mode.');
+      }
       eventSource.close();
     };
   }, []);
+
+  /* ---- Poll STT readiness after backend_ready ---- */
+  useEffect(() => {
+    if (backendStatus !== BACKEND.READY) return;
+    setSttReady(false);
+    const poll = setInterval(async () => {
+      try {
+        const res = await fetch(`${BACKEND_URL}/voice/status`);
+        const data = await res.json();
+        if (data.stt_ready) {
+          setSttReady(true);
+          clearInterval(poll);
+        }
+      } catch { /* backend not available */ }
+    }, 1000);
+    return () => clearInterval(poll);
+  }, [backendStatus]);
 
   /* ---- Load conversation list from backend ---- */
 
@@ -514,6 +545,10 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
     setIsStreaming(true);
     setIsThinking(false);
     setActiveTool(null);
+    setShowCancel(false);
+    // Show Cancel button after 15s of streaming
+    if (cancelTimerRef.current) clearTimeout(cancelTimerRef.current);
+    cancelTimerRef.current = setTimeout(() => setShowCancel(true), 15000);
 
     setPendingClarify(null);
     setPendingConfirm(null);
@@ -781,6 +816,8 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
               case 'done':
                 setIsThinking(false);
                 setActiveTool(null);
+                setShowCancel(false);
+                if (cancelTimerRef.current) { clearTimeout(cancelTimerRef.current); cancelTimerRef.current = null; }
                 updateMessage(targetId, (msg) => {
                   msg.isThinking = false;
                 });
@@ -793,6 +830,8 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
               case 'error':
                 setIsThinking(false);
                 setActiveTool(null);
+                setShowCancel(false);
+                if (cancelTimerRef.current) { clearTimeout(cancelTimerRef.current); cancelTimerRef.current = null; }
                 updateMessage(targetId, (msg) => {
                   msg.isThinking = false;
                   msg.statusText = '';
@@ -826,6 +865,8 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
       setIsStreaming(false);
       setIsThinking(false);
       setActiveTool(null);
+      setShowCancel(false);
+      if (cancelTimerRef.current) { clearTimeout(cancelTimerRef.current); cancelTimerRef.current = null; }
       // Clean up any stuck isThinking messages from this stream
       const stuckId = assistantMsgIdRef.current;
       if (stuckId) {
@@ -1328,6 +1369,11 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
                 {statusMessage}
               </p>
             )}
+            {latencyTier === 'slow' && backendStatus === BACKEND.READY && modelAvailable && (
+              <p className="chat-empty-subtitle" style={{ fontSize: 11, color: 'var(--amber-500, #f59e0b)', marginTop: -8 }}>
+                This model may be slow on your hardware — expect longer response times.
+              </p>
+            )}
 
             {(backendStatus === BACKEND.READY || backendStatus === BACKEND.ERROR) && !modelAvailable && (
               <div className="chat-no-model-prompt">
@@ -1606,6 +1652,21 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
         )}
 
         {/* Input Area */}
+        {showCancel && isStreaming && (
+          <button
+            className="cancel-btn"
+            onClick={async () => {
+              setShowCancel(false);
+              if (cancelTimerRef.current) { clearTimeout(cancelTimerRef.current); cancelTimerRef.current = null; }
+              try { await fetch(`${BACKEND_URL}/chat/cancel`, { method: 'POST' }); } catch {}
+              setIsStreaming(false);
+              setIsThinking(false);
+              streamingRef.current = false;
+            }}
+          >
+            Cancel
+          </button>
+        )}
         <div className="chat-input-area">
           {isRecording && (
             <div className="voice-recording-bar">
@@ -1651,13 +1712,13 @@ export default function ChatScreen({ config, onReset, onBackendStatus, onModelAv
               ) : (
                 <button
                   className={`chat-mic-btn ${isRecording ? 'recording' : ''} ${isTranscribing ? 'transcribing' : ''}`}
-                  disabled={isStreaming || isModelLoading || isTranscribing}
+                  disabled={isStreaming || isModelLoading || isTranscribing || !sttReady}
                   onMouseDown={startRecording}
                   onMouseUp={stopRecording}
                   onMouseLeave={() => { if (isRecording) stopRecording(); }}
                   onTouchStart={startRecording}
                   onTouchEnd={stopRecording}
-                  title={isRecording ? 'Release to send' : isTranscribing ? 'Transcribing...' : 'Hold to speak'}
+                  title={!sttReady ? 'Voice loading...' : isRecording ? 'Release to send' : isTranscribing ? 'Transcribing...' : 'Hold to speak'}
                 >
                   {isTranscribing ? (
                     <div className="mic-spinner" />

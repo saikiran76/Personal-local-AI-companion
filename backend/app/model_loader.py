@@ -478,6 +478,15 @@ class ModelLoader:
         resolved_path = await self._resolve_path(model_name, model_path)
         self._info.model_path = str(resolved_path)
 
+        # Reject split GGUF files at load time — catches config-stored names,
+        # stale files on disk, and any future entry point that skips the API checks.
+        if re.search(r'-\d{4,}-of-\d{4,}\.gguf$', resolved_path.name, re.IGNORECASE):
+            raise ValueError(
+                f"Split GGUF file detected: {resolved_path.name}. "
+                "Split model files are not supported — merge all parts into a single .gguf file first. "
+                "You can use: gguf-split --merge <first-part.gguf> <output-dir>"
+            )
+
         # Estimate RAM requirement: use registry if available, otherwise use file size * 1.3
         # (GGUF files are ~75-85% weights; memory mapping needs overhead)
         _, _, ctx_size, ram_req = GGUF_REGISTRY.get(model_name, ("", "", 4096, 0))
@@ -803,6 +812,27 @@ def get_model_tool_capability(model_name: str) -> str:
         if family in lower:
             return "weak"
     return "unknown"
+
+
+def estimate_latency_tier(model_name: str, vram_mb: int, ram_mb: int) -> str:
+    """Estimate response latency tier ('fast', 'moderate', 'slow') based on model and hardware."""
+    lower = model_name.lower()
+    # FP16 models need lots of VRAM
+    if "fp16" in lower and vram_mb < 6000:
+        return "slow"
+    # Large Q8 models on limited VRAM
+    if "q8_0" in lower and vram_mb < 8000:
+        return "slow"
+    # 7B+ models on limited VRAM
+    if any(s in lower for s in ["7b", "8b"]) and vram_mb < 5000:
+        return "moderate"
+    # Q4/Q5 models with decent VRAM
+    if any(q in lower for q in ["q4_k_m", "q5_k_m", "q4_k_s"]) and vram_mb >= 4000:
+        return "fast"
+    # 1.5B/3B models — generally fast
+    if any(s in lower for s in ["1.5b", "1.7b", "3b"]):
+        return "fast"
+    return "moderate"
 
 
 def get_model_family(model_name: str) -> str:

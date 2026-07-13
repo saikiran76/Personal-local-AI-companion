@@ -15,7 +15,7 @@ from sse_starlette.sse import EventSourceResponse
 from .model_loader import (
     ModelLoader, ModelStatus, GGUF_REGISTRY, DEFAULT_MODEL_DIR,
     detect_compute, advise_model_upgrade, list_upgrade_options,
-    get_model_tool_capability, get_model_family,
+    get_model_tool_capability, get_model_family, estimate_latency_tier,
 )
 from .agent import AgentOrchestrator
 from .mcp_client import MCPClientManager
@@ -236,6 +236,15 @@ async def events(request: Request):
             pass
 
     return EventSourceResponse(event_generator())
+
+
+@router.post("/chat/cancel")
+async def chat_cancel():
+    """Cancel the current generation — sets a flag checked by the agent's token loop."""
+    if _agent is None:
+        return {"error": "Agent not initialized"}
+    _agent.cancel()
+    return {"status": "cancelled"}
 
 
 @router.post("/chat")
@@ -567,6 +576,15 @@ async def import_model(file: UploadFile = File(...)):
 
     # Skip if already exists
     if dest_path.exists():
+        # Even an existing file might be a stale split — reject it
+        if _is_split_gguf(dest_path):
+            return {
+                "error": (
+                    f"Existing file {dest_path.name} is a split GGUF and cannot be loaded. "
+                    "Delete it from the models folder and import a merged .gguf file instead."
+                ),
+                "success": False,
+            }
         size_mb = dest_path.stat().st_size // (1024 * 1024)
         # Even if the file exists, if it's a different model than what's loaded, trigger reload
         if _model_loader and _model_loader.is_ready:
@@ -725,10 +743,12 @@ async def advise_model():
     compute = _model_loader.compute
     current = _model_loader.info.name
     upgrade = advise_model_upgrade(current, compute)
+    latency_tier = estimate_latency_tier(current, compute.get("vram_mb", 0), compute.get("ram_mb", 0))
     return {
         "current_model": current,
         "tool_capability": get_model_tool_capability(current),
         "family": get_model_family(current),
+        "latency_tier": latency_tier,
         "upgrade": upgrade,
         "compute": compute,
     }

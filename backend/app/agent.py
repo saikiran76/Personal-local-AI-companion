@@ -90,18 +90,6 @@ class AgentOrchestrator:
     }
 
     def __init__(self, model_loader: ModelLoader, mcp_manager: MCPClientManager):
-        """ReAct agent with buffered streaming and interactive clarification.
-
-        Supports three response paths:
-        - Tool call with complete args -> execute immediately (or confirm if risky)
-        - Tool call with missing args -> ask user for each missing field one at a time
-        - Text response -> stream to client
-
-        Pending state tracks whether we're waiting for a clarification answer
-        or a confirmation decision, so the next user reply routes correctly.
-        """
-
-    def __init__(self, model_loader: ModelLoader, mcp_manager: MCPClientManager):
         self.model = model_loader
         self.mcp = mcp_manager
         self.conversation_history: list[dict] = []
@@ -299,22 +287,10 @@ class AgentOrchestrator:
             yield AgentEvent(type="status", content="Summarizing results...")
             messages = self._summarize_web_content(web_query, clean_result)
 
-            full_response = ""
-            token_buffer = []
-            async for token in self.model.generate(messages=messages, max_tokens=512):
-                if self._cancel_requested:
-                    self._cancel_requested = False
-                    yield AgentEvent(type="token", content="\n\n(Generation stopped)")
-                    yield AgentEvent(type="done", content="", done=True)
-                    return
-                if token.startswith("{") and "finish_reason" in token:
-                    continue
-                full_response += token
-                token_buffer.append(token)
+            full_response = await self._generate_one_shot(messages, max_tokens=200)
 
             if self._is_valid_response(full_response):
-                for buffered_token in token_buffer:
-                    yield AgentEvent(type="token", content=buffered_token)
+                yield AgentEvent(type="token", content=full_response)
                 self.conversation_history.append({"role": "assistant", "content": full_response})
                 self._trim_history()
                 self.record_turn("assistant", full_response)
@@ -323,6 +299,76 @@ class AgentOrchestrator:
                 yield AgentEvent(type="token", content=clean_result)
                 self.conversation_history.append({"role": "assistant", "content": clean_result})
                 self.record_turn("assistant", clean_result)
+
+            yield AgentEvent(type="done", content="", done=True)
+            return
+
+        # --- Planning intent bypass: read notes + reminders, then let LLM synthesize a plan ---
+        if self._is_planning_intent(user_message):
+            logger.info("Planning intent detected: %s", user_message)
+            self.record_turn("user", user_message)
+            self.conversation_history.append({"role": "user", "content": user_message})
+
+            yield AgentEvent(type="status", content="Checking your notes and reminders...")
+
+            # Fetch notes and reminders directly — no LLM tool-decision rounds
+            notes_result = ""
+            reminders_result = ""
+            try:
+                notes_result = await self.mcp.call_tool("list_notes", {})
+                logger.info("Notes fetched: %d chars", len(notes_result))
+            except Exception as e:
+                logger.warning("list_notes failed: %s", e)
+                notes_result = "[]"
+
+            try:
+                reminders_result = await self.mcp.call_tool("list_reminders", {})
+                logger.info("Reminders fetched: %d chars", len(reminders_result))
+            except Exception as e:
+                logger.warning("list_reminders failed: %s", e)
+                reminders_result = "[]"
+
+            # Build context for LLM synthesis
+            context_parts = []
+            if notes_result and notes_result.strip() and notes_result.strip() != "[]":
+                context_parts.append(f"Notes:\n{notes_result[:2000]}")
+            if reminders_result and reminders_result.strip() and reminders_result.strip() != "[]":
+                context_parts.append(f"Reminders:\n{reminders_result[:2000]}")
+
+            if context_parts:
+                context_text = "\n\n".join(context_parts)
+            else:
+                context_text = "No notes or reminders found."
+
+            # Add to conversation history so LLM sees the data
+            self.conversation_history.append({
+                "role": "tool",
+                "content": f"User's current notes and reminders:\n{context_text}",
+            })
+            self._trim_history()
+            self.record_turn("tool", context_text[:500])
+
+            # Build messages using _build_messages() — includes date/time, memories, tool descriptions
+            # Then replace the last user message with a focused planning prompt
+            messages = self._build_messages()
+            # Find and replace the last user message with the planning context
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i]["role"] == "user":
+                    messages[i] = {"role": "user", "content": f"Help me plan my day.\n\n{context_text}"}
+                    break
+
+            yield AgentEvent(type="status", content="Creating your plan...")
+
+            full_response = await self._generate_one_shot(messages, max_tokens=200)
+
+            if self._is_valid_response(full_response):
+                yield AgentEvent(type="token", content=full_response)
+                self.conversation_history.append({"role": "assistant", "content": full_response})
+                self._trim_history()
+                self.record_turn("assistant", full_response)
+            else:
+                yield AgentEvent(type="token", content="I couldn't generate a plan right now. Could you try again?")
+                self.record_turn("assistant", "Plan generation failed")
 
             yield AgentEvent(type="done", content="", done=True)
             return
@@ -735,8 +781,11 @@ class AgentOrchestrator:
     async def _handle_permission_resume(
         self, pending: dict, user_response: str
     ) -> AsyncIterator[AgentEvent]:
-        """Persist a permission decision, then replay the exact blocked tool call."""
+        """Persist a permission decision, then replay the exact blocked tool call.
+        After execution, continues the ReAct loop so the LLM can synthesize a response."""
         scope = pending["scope"]
+        tool_name = pending["tool_name"]
+        tool_args = pending["tool_args"]
         answer = user_response.strip().lower()
         if answer not in ("yes", "y", "confirm", "ok", "sure", "do it", "go", "allow", "allowed"):
             db.set_permission(scope, False)
@@ -752,12 +801,8 @@ class AgentOrchestrator:
         logger.info("Permission granted: %s", scope)
         db.log_activity(scope, "permission", f"User granted {scope} access")
 
-        replay = {
-            "type": "confirm",
-            "tool_name": pending["tool_name"],
-            "tool_args": pending["tool_args"],
-        }
-        async for event in self._handle_confirm_resume(replay, "yes"):
+        # Execute via shared helper — handles tool_call, tool_result, persistence, ack/continue
+        async for event in self._execute_tool_and_continue(tool_name, tool_args):
             yield event
 
     async def _handle_confirm_resume(
@@ -776,51 +821,9 @@ class AgentOrchestrator:
             yield AgentEvent(type="done", content="", done=True)
             return
 
-        # Execute
-        yield AgentEvent(
-            type="tool_call",
-            content=f"Using {tool_name}...",
-            tool_name=tool_name,
-            tool_args=tool_args,
-        )
-
-        try:
-            tool_result = await self.mcp.call_tool(tool_name, tool_args)
-        except Exception as e:
-            tool_result = json.dumps({"error": str(e)})
-            logger.error("Tool execution failed: %s", e)
-
-        self._tool_call_count += 1
-
-        yield AgentEvent(
-            type="tool_result",
-            content=tool_result,
-            tool_name=tool_name,
-            tool_result=tool_result,
-        )
-
-        summary_result = tool_result[:300] + "..." if len(tool_result) > 300 else tool_result
-        self.conversation_history.append({
-            "role": "tool",
-            "content": f"Tool '{tool_name}' result:\n{summary_result}",
-        })
-        self._trim_history()
-
-        # Persist
-        self.record_turn("tool", summary_result)
-        scope = self._tool_scope(tool_name)
-        db.log_activity(scope, tool_name, self._tool_ack_message(tool_name, tool_args, tool_result)[:100])
-
-        # Data tools: let LLM synthesize. Direct ack tools: emit ack and stop.
-        if '"error"' not in tool_result and tool_name in self._DIRECT_ACK_TOOLS:
-            ack = self._tool_ack_message(tool_name, tool_args, tool_result)
-            yield AgentEvent(type="token", content="\n\n" + ack)
-            self.conversation_history.append({"role": "assistant", "content": ack})
-            self._trim_history()
-            yield AgentEvent(type="done", content="", done=True)
-        else:
-            async for event in self._final_response_round():
-                yield event
+        # Execute via shared helper — handles tool_call, tool_result, persistence, ack/continue
+        async for event in self._execute_tool_and_continue(tool_name, tool_args):
+            yield event
 
     async def _final_response_round(self) -> AsyncIterator[AgentEvent]:
         """One more LLM round to generate a natural language response after tool execution.
@@ -883,6 +886,73 @@ class AgentOrchestrator:
             self.record_turn("assistant", "Done!")
 
         yield AgentEvent(type="done", content="", done=True)
+
+    # --- Shared execution helpers ---
+
+    async def _execute_tool_and_continue(self, tool_name: str, tool_args: dict) -> AsyncIterator[AgentEvent]:
+        """Execute a tool, persist the result, and either ack or continue the ReAct loop.
+        Single chokepoint for tool execution — called by confirm-resume, permission-resume,
+        and any other path that needs to run a tool and get a response."""
+        scope = self._tool_scope(tool_name)
+
+        yield AgentEvent(
+            type="tool_call",
+            content=f"Using {tool_name}...",
+            tool_name=tool_name,
+            tool_args=tool_args,
+        )
+
+        try:
+            tool_result = await self.mcp.call_tool(tool_name, tool_args)
+        except Exception as e:
+            tool_result = json.dumps({"error": str(e)})
+            logger.exception("Tool execution failed: %s", e)
+
+        self._tool_call_count += 1
+
+        yield AgentEvent(
+            type="tool_result",
+            content=tool_result,
+            tool_name=tool_name,
+            tool_result=tool_result,
+        )
+
+        # Store tool result in history for LLM context
+        limit = 2500 if tool_name in {"search_and_fetch", "fetch_page", "read_file", "read_pdf"} else 400
+        summary_result = tool_result[:limit] + "..." if len(tool_result) > limit else tool_result
+        self.conversation_history.append({
+            "role": "tool",
+            "content": f"Tool '{tool_name}' result:\n{summary_result}",
+        })
+        self._trim_history()
+
+        # Persist
+        self.record_turn("tool", summary_result)
+        db.log_activity(scope, tool_name, self._tool_ack_message(tool_name, tool_args, tool_result)[:100])
+
+        # Direct ack tools: emit ack and stop. Data tools: continue the loop.
+        if '"error"' not in tool_result and tool_name in self._DIRECT_ACK_TOOLS:
+            ack = self._tool_ack_message(tool_name, tool_args, tool_result)
+            yield AgentEvent(type="token", content="\n\n" + ack)
+            self.conversation_history.append({"role": "assistant", "content": ack})
+            self._trim_history()
+            yield AgentEvent(type="done", content="", done=True)
+        else:
+            async for event in self._final_response_round():
+                yield event
+
+    async def _generate_one_shot(self, messages: list[dict], max_tokens: int = 200) -> str:
+        """Generate a single response without grammar constraints. Returns the full text.
+        Used for planning synthesis, web search summarization, email draft, etc."""
+        full_response = ""
+        async for token in self.model.generate(messages=messages, max_tokens=max_tokens):
+            if self._cancel_requested:
+                self._cancel_requested = False
+                break
+            if token.startswith("{") and "finish_reason" in token:
+                continue
+            full_response += token
+        return full_response
 
     # --- Tool argument validation ---
 
@@ -1115,6 +1185,24 @@ class AgentOrchestrator:
                 depth -= 1
                 if depth == 0:
                     return True
+        return False
+
+    # --- Planning intent detection ---
+    _PLANNING_PATTERNS = [
+        re.compile(r'\b(plan|schedule|organize)\s+(?:my|the)\s+(?:day|schedule|agenda|calendar)\b', re.IGNORECASE),
+        re.compile(r'\bwhat\s+(?:should\s+)?(?:i|we)\s+(?:do|have|got)\s+(?:today|tomorrow|this\s+week)\b', re.IGNORECASE),
+        re.compile(r'\b(my|the)\s+(?:schedule|agenda|plan|calendar)\s+(?:for|today|tomorrow|this\s+week)\b', re.IGNORECASE),
+        re.compile(r'\bwhat(?:\'s|\s+is)\s+(?:on\s+)?(?:my|the)\s+(?:schedule|agenda|plan|calendar)\b', re.IGNORECASE),
+        re.compile(r'\bwhat\s+do\s+i\s+have\s+(?:today|tomorrow|this\s+week)\b', re.IGNORECASE),
+        re.compile(r'\bhelp\s+me\s+(?:plan|schedule|prepare)\s+(?:my|the)\s+(?:day|morning|afternoon|evening|week)\b', re.IGNORECASE),
+        re.compile(r'\bwhat\s+am\s+i\s+(?:doing|scheduled)\s+(?:today|tomorrow)\b', re.IGNORECASE),
+    ]
+
+    def _is_planning_intent(self, message: str) -> bool:
+        """Detect if the user wants to plan their day / see their schedule."""
+        for pattern in self._PLANNING_PATTERNS:
+            if pattern.search(message):
+                return True
         return False
 
     # --- Memory intent detection ---
